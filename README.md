@@ -1,0 +1,149 @@
+# gluewc
+
+[![build](https://github.com/vladbiber/gluewc/actions/workflows/build.yml/badge.svg)](https://github.com/vladbiber/gluewc/actions/workflows/build.yml)
+[![license: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![wlroots 0.19](https://img.shields.io/badge/wlroots-0.19-7aa2f7.svg)](https://gitlab.freedesktop.org/wlroots/wlroots/-/releases/0.19.3)
+
+gluewc is a compact, animated Wayland compositor built around automatic BSP
+tiling. It combines a dwl-sized C codebase with workspaces, a GNOME-style
+overview, touchpad gestures, runtime configuration and SceneFX visuals.
+
+It is a fork of [dwl 0.8](https://codeberg.org/dwl/dwl), using
+[wlroots 0.19](https://gitlab.freedesktop.org/wlroots/wlroots) and
+[SceneFX 0.4](https://github.com/wlrfx/scenefx/releases/tag/0.4.1).
+
+## Highlights
+
+- Automatic BSP tiling with per-split direction and ratio control
+- Nine independent workspaces on every monitor
+- Animated window open, close, retile and workspace transitions
+- GNOME-style overview with neighboring workspaces and live wallpaper layers
+- Drag windows between workspaces directly from the overview
+- Three-finger workspace and overview gestures
+- Directional keyboard focus; crossing the left or right edge changes workspace
+- Insert and normal keyboard modes inspired by modal window managers
+- Runtime config and keybind reload without recompiling
+- Rounded corners, blur and optional transparency through SceneFX
+- XWayland, layer-shell, session lock and output power-management support
+- dwl IPC and foreign-toplevel support for bars and desktop shells
+- Black fallback background when no wallpaper program is running
+
+## Install
+
+The installer detects the distribution, installs build dependencies, builds a
+compatible SceneFX/wlroots pair when needed, and installs the session entry:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vladbiber/gluewc/main/install.sh | sh
+```
+
+It requests administrator privileges for packages and the system install. To
+inspect it before running:
+
+```sh
+git clone https://github.com/vladbiber/gluewc.git
+cd gluewc
+less install.sh
+./install.sh
+```
+
+The dependency resolver covers current releases of:
+
+| Family | Target |
+| --- | --- |
+| Arch | Arch Linux, EndeavourOS, Manjaro |
+| Debian | Debian 13+ |
+| Ubuntu | Ubuntu 25.10+ and derivatives |
+| Fedora | Fedora 43+ |
+| SUSE | openSUSE Tumbleweed |
+| Gentoo | Gentoo Linux |
+| Alpine | Alpine Edge |
+| Void | Void Linux rolling |
+
+Gentoo is hardware-tested and the Arch path is exercised by CI. The remaining
+resolvers target their current package sets. Older distributions may not have
+the Wayland, libdrm and Pixman versions required by SceneFX 0.4; see
+[the installation guide](docs/INSTALL.md) for manual and troubleshooting
+instructions.
+
+After installation, log out and select **gluewc** in the display manager. From
+a TTY, run:
+
+```sh
+gluewc-session
+```
+
+The default bindings expect `alacritty`, `rofi`, `grim`, `pactl`, `playerctl`
+and `brightnessctl`. They are optional and every command can be replaced in
+the runtime config.
+
+## First steps
+
+The session wrapper creates `~/.config/gluewc/config.conf` on first login.
+Edit it and press `Super+Shift+R` to reload.
+
+| Binding | Action |
+| --- | --- |
+| `Super` tap | Toggle overview |
+| `Super+Return` or `Super+Q` | Open terminal |
+| `Super+Space` | Open Rofi |
+| `Super+1` … `Super+9` | Change workspace |
+| `Super+Ctrl+1` … `Super+Ctrl+9` | Move window and follow |
+| `Super+Arrow` or `Super+H/J/K/L` | Directional focus |
+| `Super+Shift+Arrow` | Swap windows |
+| `Super+F` | Workspace-area fullscreen |
+| `Super+Shift+F` | Real fullscreen |
+| `Super+V` | Toggle centered floating |
+| `Super+C` | Close window |
+| `Super+O` | Toggle configured transparency |
+| `Super+Escape` | Enter normal mode; `I` returns to insert mode |
+| `Super+Shift+R` | Reload config in place |
+| `Super+Shift+Q` | Quit gluewc |
+
+In the overview, use arrows, workspace numbers, the mouse wheel or a two-finger
+horizontal swipe to navigate. Click a window to focus it, or drag it onto the
+left, center or right workspace. A three-finger horizontal swipe changes the
+workspace from the desktop; a three-finger vertical swipe opens or closes the
+overview. `Super+wheel` also changes workspace.
+
+## Desktop components
+
+gluewc deliberately does not bundle a bar, launcher or wallpaper daemon.
+Layer-shell clients reserve their own space, and wallpaper layers are included
+in the overview.
+
+Examples for `~/.config/gluewc/config.conf`:
+
+```ini
+autostart = swww-daemon
+autostart = waypaper --restore
+autostart = waybar
+```
+
+Use either wallpaper command, not both. With neither, `root_color = 000000`
+keeps the background black. Waybar can use its `dwl` workspaces module; desktop
+shells can also consume the foreign-toplevel protocol.
+
+## Configuration and building
+
+- [Installation and distro notes](docs/INSTALL.md)
+- [Configuration, actions and gestures](docs/CONFIGURATION.md)
+- [Default runtime config](config.def.conf)
+- [Contributing](CONTRIBUTING.md)
+
+Manual build, once dependencies are installed:
+
+```sh
+make
+sudo make install
+```
+
+Compiled defaults remain in `config.def.h`; normal users only need the runtime
+config. Run `man gluewc` for command-line and environment details.
+
+## License and credits
+
+gluewc is GPL-3.0-or-later. It is derived from dwl, which grew from the wlroots
+TinyWL example and carries code influenced by dwm and sway. See `LICENSE*` and
+the Git history for the complete notices.
+# gluewc

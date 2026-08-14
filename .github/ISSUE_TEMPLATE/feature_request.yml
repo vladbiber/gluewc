@@ -1,0 +1,19 @@
+name: Feature request
+description: Propose a focused compositor improvement
+title: "[feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: Use case
+      description: Describe the workflow problem, not only the proposed API.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives

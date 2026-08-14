@@ -1,0 +1,164 @@
+.Dd August 15, 2026
+.Dt GLUEWC 1
+.Os
+.Sh NAME
+.Nm gluewc
+.Nd animated BSP Wayland compositor
+.Sh SYNOPSIS
+.Nm
+.Op Fl d
+.Op Fl s Ar command
+.Nm
+.Fl v
+.Sh DESCRIPTION
+.Nm
+is a wlroots-based Wayland compositor with automatic binary-space-partition
+tiling, fixed workspaces, modal controls, SceneFX effects and an animated
+workspace overview.
+.Pp
+The recommended entry point is
+.Nm gluewc-session
+or the gluewc display-manager session.
+.Bl -tag -width Ds
+.It Fl d
+Enable verbose wlroots logging.
+.It Fl s Ar command
+Start
+.Ar command
+through a shell with the compositor.
+Its process group receives
+.Dv SIGTERM
+when gluewc exits.
+.It Fl v
+Print the version and exit.
+.El
+.Sh CONFIGURATION
+Runtime configuration is read from
+.Pa $XDG_CONFIG_HOME/gluewc/config.conf
+or
+.Pa ~/.config/gluewc/config.conf .
+The installed session creates this file from
+.Pa /usr/local/share/gluewc/config.def.conf
+on first login.
+.Pp
+Appearance, XKB settings, autostart commands and bindings can be changed at
+runtime.
+Press Mod-Shift-R to reload the file in place.
+Compiled defaults
+remain in
+.Pa config.h .
+.Pp
+A binding has the form:
+.Bd -literal -offset indent
+bind_insert = mod+Return = spawn:foot
+bind_normal = h = wm:ratio:-0.05
+.Ed
+.Pp
+See the project configuration guide and the installed default config for all
+settings and actions.
+.Sh DEFAULT BINDINGS
+.Bl -tag -width 28n -compact
+.It Mod tap
+Toggle overview.
+.It Mod-Return , Mod-Q
+Start alacritty.
+.It Mod-Space
+Start rofi in application mode.
+.It Mod-[1-9]
+Select workspace 1 through 9.
+.It Mod-Ctrl-[1-9]
+Move the focused window to a workspace and follow it.
+.It Mod-Arrow , Mod-[h/j/k/l]
+Focus directionally.
+Crossing the horizontal edge selects the adjacent
+workspace.
+.It Mod-Shift-Arrow
+Swap the focused window directionally.
+.It Mod-PageUp , Mod-PageDown
+Select the previous or next workspace.
+.It Mod-Ctrl-PageUp , Mod-Ctrl-PageDown
+Move the focused window to the previous or next workspace.
+.It Mod-F
+Toggle fullscreen inside the panel-reserved usable area.
+.It Mod-Shift-F
+Toggle real output fullscreen.
+.It Mod-V
+Toggle centered floating.
+.It Mod-B
+Toggle window borders and gaps.
+.It Mod-O
+Toggle configured window opacity.
+.It Mod-C
+Close the focused window.
+.It Mod-Escape
+Enter normal mode.
+.It Mod-Shift-R
+Reload runtime configuration.
+.It Mod-Shift-Q
+Quit.
+.El
+.Ss Normal mode
+Normal mode consumes keyboard input until
+.Sy i
+returns to insert mode.
+Arrow keys and j/k focus windows, h/l adjust the
+focused split ratio, H/L swap in tree order, and s toggles split direction.
+.Ss Mouse
+.Bl -tag -width 20n -compact
+.It Mod-Button1
+Move the focused window; tiled windows become floating.
+.It Mod-Button2
+Toggle floating.
+.It Mod-Button3
+Resize the focused window; tiled windows become floating.
+.El
+.Sh OVERVIEW AND GESTURES
+The overview shows the current workspace and its two neighbors.
+Use arrows,
+workspace numbers, the wheel or a two-finger horizontal swipe to navigate.
+Click a window to focus it or drag it between workspace cards.
+.Pp
+A three-finger horizontal swipe changes workspace.
+A three-finger upward swipe opens the overview and a downward swipe closes it.
+Mod-wheel changes
+workspace from the desktop.
+.Sh ENVIRONMENT
+.Bl -tag -width XDG_CURRENT_DESKTOP
+.It Ev XDG_RUNTIME_DIR
+Directory used for the Wayland socket.
+It must be set.
+.It Ev XDG_CONFIG_HOME
+Base directory for the runtime config.
+.It Ev XDG_STATE_HOME
+Base directory used by
+.Nm gluewc-session
+for logs.
+.It Ev WAYLAND_DISPLAY
+Set by gluewc for child Wayland clients.
+.It Ev DISPLAY
+Set when the built-in XWayland server is ready.
+.It Ev WLR_*
+wlroots backend, renderer and diagnostic options.
+.It Ev XKB_* , XCOMPOSEFILE , XCURSOR_PATH
+Keyboard and cursor configuration used by the underlying libraries.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa ~/.config/gluewc/config.conf
+Runtime configuration.
+.It Pa ~/.local/state/gluewc.log
+Current session log when started with gluewc-session.
+.It Pa ~/.local/state/gluewc.log.old
+Previous session log.
+.It Pa /usr/share/wayland-sessions/gluewc.desktop
+Display-manager session entry.
+.El
+.Sh SEE ALSO
+.Xr rofi 1 ,
+.Xr waybar 5 ,
+.Xr xkeyboard-config 7
+.Sh AUTHORS
+.An "The gluewc contributors"
+.Pp
+gluewc is derived from dwl and the wlroots TinyWL example.
+Full copyright and license notices are included with the source.

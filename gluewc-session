@@ -1,0 +1,47 @@
+#!/bin/sh
+
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=gluewc
+export XDG_CURRENT_DESKTOP=gluewc
+
+CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/gluewc"
+if [ ! -e "$CFGDIR/config.conf" ]; then
+	mkdir -p "$CFGDIR"
+	for dir in /usr/local/share/gluewc /usr/share/gluewc; do
+		if [ -r "$dir/config.def.conf" ]; then
+			cp "$dir/config.def.conf" "$CFGDIR/config.conf"
+			break
+		fi
+	done
+fi
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] \
+		&& command -v dbus-run-session >/dev/null 2>&1; then
+	exec dbus-run-session -- "$0" "$@"
+fi
+
+start_once() {
+	command -v "$1" >/dev/null 2>&1 || return
+	if ! pgrep -u "$(id -u)" -x "$1" >/dev/null 2>&1; then
+		"$@" >/dev/null 2>&1 &
+	fi
+}
+
+start_once pipewire
+start_once wireplumber
+start_once pipewire-pulse
+
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}"
+LOG="$LOGDIR/gluewc.log"
+mkdir -p "$LOGDIR"
+mv -f "$LOG" "$LOG.old" 2>/dev/null
+ulimit -c unlimited 2>/dev/null
+
+{
+	printf '== gluewc session %s ==\n' "$(date)"
+	gluewc "$@"
+	status=$?
+	printf '== gluewc exited status=%s %s ==\n' "$status" "$(date)"
+	sync 2>/dev/null
+	exit "$status"
+} >>"$LOG" 2>&1

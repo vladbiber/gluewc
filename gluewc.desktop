@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=gluewc
+Comment=Animated BSP Wayland compositor
+Exec=gluewc-session
+Type=Application
+DesktopNames=gluewc

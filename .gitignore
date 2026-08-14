@@ -1,0 +1,15 @@
+gluewc
+*.o
+*-protocol.c
+*-protocol.h
+.ccls-cache
+config.h
+.claude-flow/
+core
+core.*
+compile_commands.json
+tests/vkbd
+tests/wshot
+tests/wlpower
+tests/wlpower.c
+tests/wlr-output-power-management-unstable-v1.xml

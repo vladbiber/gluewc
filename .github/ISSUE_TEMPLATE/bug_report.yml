@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible gluewc problem
+title: "[bug] "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include the expected behavior and exact reproduction steps.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Version
+      description: Output of `gluewc -v`.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: System
+      description: Distribution, GPU, wlroots and SceneFX versions.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Log
+      description: Relevant end of `~/.local/state/gluewc.log`; remove private data.
+      render: text
+  - type: checkboxes
+    attributes:
+      label: Checklist
+      options:
+        - label: I reproduced this with the current main branch.
+          required: true
+        - label: I checked for an existing report.
+          required: true
