@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- BSP direct manipulation: Mod-drag no longer tears a tiled window out into a
+  float, it hands the window the tile it is dropped on and the two trade
+  places in the tree; Mod-right-drag moves the splits the window sits between
+  instead of floating it, grabbing the edges nearest the click so a corner
+  drag resizes in both directions at once. Windows that are already floating
+  are still moved and resized as floats and stay floating.
+
 ## 0.2.0 — 2026-08-15
 
 ### Added

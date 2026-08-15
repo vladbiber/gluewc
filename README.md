@@ -99,6 +99,8 @@ Edit it and press `Super+Shift+R` to reload.
 | `Super+Shift+Arrow` | Swap windows (nudge them in the drift layout) |
 | `Super+N` | Cycle BSP, scroll and drift layouts |
 | `Super+Ctrl+Arrow` | Pan the drift canvas |
+| `Super+drag` | Swap the window with the tile it is dropped on |
+| `Super+right-drag` | Resize the window against its neighbours |
 | `Super+Shift+drag` | Drag the drift canvas around with the mouse |
 | `Super+W`, `Super+±`, `Super+0` | Drift: fit, zoom, 1:1 |
 | `Super+wheel` / `Super+Shift+wheel` | Change workspace / zoom the drift camera |

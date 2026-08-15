@@ -93,7 +93,7 @@
 /* enums */
 enum { CurNormal, CurPressed, CurMove, CurResize,
        CurDragTile, CurResizeCol, CurDriftMove, CurDriftResize,
-       CurDriftPan }; /* cursor */
+       CurDriftPan, CurBSPMove, CurBSPResize }; /* cursor */
 enum { LtBSP, LtScroll, LtDrift, LtLast }; /* per-monitor layouts */
 enum { XDGShell, LayerShell, X11 }; /* client types */
 enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS }; /* scene layers */
@@ -124,6 +124,7 @@ struct Node {
 	float ratio;
 	Node *a, *b, *par;
 	Client *c;
+	struct wlr_box box; /* area this node was last tiled into, gaps included */
 };
 
 /* one column of the niri-style scrolling layout */
@@ -357,10 +358,13 @@ static void attachclient(Monitor *m, unsigned int ws, Client *c);
 static void axisnotify(struct wl_listener *listener, void *data);
 static void bsp_attach(Monitor *m, unsigned int ws, Client *c);
 static void bsp_detach(Client *c);
+static void bsp_dragto(Client *c, double cx, double cy);
+static Node *bsp_findsplit(Node *n, int horiz, int after);
 static Node *bsp_first(Node *n);
 static int bsp_has_tiled(Node *n);
 static Node *bsp_nextleaf(Node *tree, Node *cur);
 static Node *bsp_prevleaf(Node *tree, Node *cur);
+static void bsp_resizeto(Client *c, double cx, double cy);
 static void bsp_tile(Node *n, struct wlr_box box);
 static void buttonpress(struct wl_listener *listener, void *data);
 static void chvt(const Arg *arg);
@@ -636,9 +640,11 @@ static KeyboardGroup *super_group;
 static unsigned int cursor_mode;
 static Client *grabc;
 static int grabcx, grabcy; /* client-relative */
-static double grab_startx; /* cursor x at the start of a column resize or canvas pan */
-static double grab_starty; /* cursor y at the start of a canvas pan */
+static double grab_startx; /* cursor x at the start of a resize or canvas pan */
+static double grab_starty; /* cursor y at the start of a resize or canvas pan */
 static float grab_wfrac;   /* column width when the resize started */
+static Node *bsp_grabh, *bsp_grabv; /* splits a bsp drag-resize is moving */
+static float bsp_grabhr, bsp_grabvr; /* their ratios when the drag started */
 static Monitor *grabm;     /* monitor whose camera a canvas pan is dragging */
 static double grab_camx, grab_camy; /* camera position when the pan started */
 static int lt_migrating;   /* set while windows move between layouts */
@@ -1617,6 +1623,11 @@ bsp_detach(Client *c)
 	if (!n)
 		return;
 	c->node = NULL;
+	/* a running drag-resize must not keep pointing at a freed split */
+	if (bsp_grabh == n)
+		bsp_grabh = NULL;
+	if (bsp_grabv == n)
+		bsp_grabv = NULL;
 	if (!n->par) {
 		if (m)
 			m->tree[c->ws] = NULL;
@@ -1636,6 +1647,65 @@ bsp_detach(Client *c)
 	}
 	free(p);
 	free(n);
+}
+
+void
+bsp_dragto(Client *c, double cx, double cy)
+{
+	/* bsp drag: hand the window the tile it is dragged onto instead of
+	 * floating it.  arrange() can bounce back into motionnotify(), so this
+	 * has to survive re-entry. */
+	static int busy;
+	Monitor *m = c->mon;
+	Client *t, *target = NULL;
+	Node *a, *b;
+
+	if (busy || !m || !c->node || c->isfloating)
+		return;
+	wl_list_for_each(t, &clients, link) {
+		if (t == c || !t->node || t->isfloating || t->isfullscreen
+				|| !VISIBLEON(t, m))
+			continue;
+		if (cx >= t->geom.x && cx < t->geom.x + t->geom.width
+				&& cy >= t->geom.y && cy < t->geom.y + t->geom.height) {
+			target = t;
+			break;
+		}
+	}
+	if (!target)
+		return;
+	a = c->node;
+	b = target->node;
+	a->c = target;
+	b->c = c;
+	c->node = b;
+	target->node = a;
+	busy = 1;
+	arrange(m);
+	busy = 0;
+}
+
+Node *
+bsp_findsplit(Node *n, int horiz, int after)
+{
+	/* Nearest ancestor split of the requested orientation whose dividing
+	 * line lies after (right of / below) n, or before it when after is 0.
+	 * Splits with nothing tiled on one side are skipped: bsp_tile() hands
+	 * the whole box to the other side there, so their ratio does nothing.
+	 * A split on the wrong side is kept as a fallback for windows that sit
+	 * against the screen edge. */
+	Node *p, *fallback = NULL;
+
+	for (; n && n->par; n = n->par) {
+		p = n->par;
+		if (!p->horiz != !horiz || !bsp_has_tiled(p->a) || !bsp_has_tiled(p->b))
+			continue;
+		if ((p->a == n) == !!after)
+			return p;
+		if (!fallback)
+			fallback = p;
+	}
+	return fallback;
 }
 
 Node *
@@ -1699,6 +1769,36 @@ bsp_prevleaf(Node *tree, Node *cur)
 }
 
 void
+bsp_resizeto(Client *c, double cx, double cy)
+{
+	/* bsp right-drag: move the split lines the grab started on, so the
+	 * window resizes inside the tree and its neighbours give up the room */
+	static int busy;
+	float r;
+	int changed = 0;
+
+	if (busy || !c->mon || !c->node || c->isfloating)
+		return;
+	if (bsp_grabh && bsp_grabh->box.width > 0) {
+		r = bsp_grabhr + (float)((cx - grab_startx) / bsp_grabh->box.width);
+		r = r < 0.05f ? 0.05f : r > 0.95f ? 0.95f : r;
+		changed |= fabsf(r - bsp_grabh->ratio) >= 0.001f;
+		bsp_grabh->ratio = r;
+	}
+	if (bsp_grabv && bsp_grabv->box.height > 0) {
+		r = bsp_grabvr + (float)((cy - grab_starty) / bsp_grabv->box.height);
+		r = r < 0.05f ? 0.05f : r > 0.95f ? 0.95f : r;
+		changed |= fabsf(r - bsp_grabv->ratio) >= 0.001f;
+		bsp_grabv->ratio = r;
+	}
+	if (!changed)
+		return;
+	busy = 1;
+	arrange(c->mon);
+	busy = 0;
+}
+
+void
 bsp_tile(Node *n, struct wlr_box box)
 {
 	/* Hiding borders is a visual choice; keep the tile spacing intact. */
@@ -1706,6 +1806,7 @@ bsp_tile(Node *n, struct wlr_box box)
 
 	if (!n)
 		return;
+	n->box = box; /* remembered so a drag-resize can scale its own split */
 	if (n->leaf) {
 		if (!n->c->isfloating) {
 			resize(n->c, (struct wlr_box){.x = box.x + gap, .y = box.y + gap,
@@ -2966,6 +3067,7 @@ buttonpress(struct wl_listener *listener, void *data)
 				selmon = xytomon(cursor->x, cursor->y);
 				setmon(grabc, selmon, -1);
 			} else if ((cursor_mode == CurDragTile
+					|| cursor_mode == CurBSPMove
 					|| cursor_mode == CurDriftMove
 					|| cursor_mode == CurDriftResize) && grabc) {
 				Monitor *dropmon = xytomon(cursor->x, cursor->y);
@@ -2980,6 +3082,7 @@ buttonpress(struct wl_listener *listener, void *data)
 			cursor_mode = CurNormal;
 			grabc = NULL;
 			grabm = NULL;
+			bsp_grabh = bsp_grabv = NULL;
 			return;
 		}
 		cursor_mode = CurNormal;
@@ -5578,6 +5681,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove
 				&& cursor_mode != CurDragTile && cursor_mode != CurResizeCol
+				&& cursor_mode != CurBSPMove && cursor_mode != CurBSPResize
 				&& cursor_mode != CurDriftMove && cursor_mode != CurDriftResize
 				&& cursor_mode != CurDriftPan) {
 			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
@@ -5621,6 +5725,14 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 	} else if (cursor_mode == CurDragTile) {
 		if (grabc)
 			scroll_dragto(grabc, cursor->x);
+		return;
+	} else if (cursor_mode == CurBSPMove) {
+		if (grabc)
+			bsp_dragto(grabc, cursor->x, cursor->y);
+		return;
+	} else if (cursor_mode == CurBSPResize) {
+		if (grabc)
+			bsp_resizeto(grabc, cursor->x, cursor->y);
 		return;
 	} else if (cursor_mode == CurDriftMove) {
 		if (grabc)
@@ -5712,6 +5824,32 @@ moveresize(const Arg *arg)
 			grab_startx = cursor->x;
 			grab_wfrac = grabc->col->wfrac;
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "ew-resize");
+		}
+		return;
+	}
+
+	if (grabc->node && !grabc->isfloating && !grabc->isfakefull) {
+		/* bsp direct manipulation: drag swaps the window with the tile
+		 * under the cursor and right-drag moves the splits it sits
+		 * between — neither makes the window float */
+		if (arg->ui == CurResize) {
+			/* the grab picks the edges the click is nearest, so
+			 * dragging away from the window always grows it */
+			bsp_grabh = bsp_findsplit(grabc->node, 1,
+					cursor->x >= grabc->geom.x + grabc->geom.width / 2.0);
+			bsp_grabv = bsp_findsplit(grabc->node, 0,
+					cursor->y >= grabc->geom.y + grabc->geom.height / 2.0);
+			if (!bsp_grabh && !bsp_grabv)
+				return; /* the only window on the workspace */
+			bsp_grabhr = bsp_grabh ? bsp_grabh->ratio : 0.5f;
+			bsp_grabvr = bsp_grabv ? bsp_grabv->ratio : 0.5f;
+			grab_startx = cursor->x;
+			grab_starty = cursor->y;
+			cursor_mode = CurBSPResize;
+			wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
+		} else {
+			cursor_mode = CurBSPMove;
+			wlr_cursor_set_xcursor(cursor, cursor_mgr, "grabbing");
 		}
 		return;
 	}
@@ -7419,6 +7557,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 	if (c == grabc) {
 		cursor_mode = CurNormal;
 		grabc = NULL;
+		bsp_grabh = bsp_grabv = NULL;
 	}
 	if (c == overview_drag_client) {
 		overview_drag_client = NULL;

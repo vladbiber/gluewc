@@ -155,6 +155,13 @@ Actions:
   swipes walk the focus through the windows on the strip, inside and outside
   the overview; a long swipe repeats. Overview arrows do the same: Left/Right
   walk the strip, Up/Down change workspace.
+- BSP layout: Super+drag hands the window the tile it is dropped on — the two
+  windows trade places in the tree and neither starts floating — and
+  Super+right-drag moves the splits the window sits between, so its neighbours
+  give up the room instead. The right-drag grabs the edges nearest the click,
+  so a corner drag resizes in both directions at once; a window against the
+  screen edge has no split there and moves the one on its other side. A window
+  that is already floating keeps floating and is moved or resized as before.
 - Scroll layout: Super+drag reorders the strip in place (windows never start
   floating) and Super+right-drag resizes the column. Moving focus away from a
   fullscreen window resizes it back into its column, like niri.
