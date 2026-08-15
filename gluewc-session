@@ -7,7 +7,13 @@ export XDG_CURRENT_DESKTOP=gluewc
 CFGDIR="${XDG_CONFIG_HOME:-$HOME/.config}/gluewc"
 if [ ! -e "$CFGDIR/config.conf" ]; then
 	mkdir -p "$CFGDIR"
-	for dir in /usr/local/share/gluewc /usr/share/gluewc; do
+	# The prefix this script was installed under comes first, so a custom
+	# --prefix and a Nix store path find their own default config; the fixed
+	# paths keep working for anything that puts the script elsewhere.
+	SELFDIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
+	for dir in ${GLUEWC_DATADIR:+"$GLUEWC_DATADIR"} \
+			${SELFDIR:+"$SELFDIR/../share/gluewc"} \
+			/usr/local/share/gluewc /usr/share/gluewc; do
 		if [ -r "$dir/config.def.conf" ]; then
 			cp "$dir/config.def.conf" "$CFGDIR/config.conf"
 			break

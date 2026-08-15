@@ -2,7 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- NixOS support through a flake: a package, an overlay, a `nix develop` shell
+  and a `programs.gluewc` NixOS module that registers the session with the
+  display manager and sets up PipeWire, the portals and Xwayland
+- The installer sets up sound as well: PipeWire, WirePlumber and the ALSA and
+  PulseAudio bridges are installed with the build dependencies and their user
+  units are enabled on systemd distributions, with `--no-audio` to opt out
+- The installer recognises more distributions by name — Artix, CachyOS, Garuda,
+  ArcoLinux, Devuan, Mint, Pop!_OS, elementary, Zorin, Kali, Raspberry Pi OS,
+  Nobara, Rocky, AlmaLinux, postmarketOS — and an unlisted distribution now
+  falls back to whichever package manager is on PATH instead of being rejected
+- A detailed git-and-make build walkthrough in the installation guide, covering
+  `PREFIX`, `DESTDIR`, `config.h`, private wlroots builds and staying up to date
+
 ### Changed
+
+- `gluewc-session` looks for its default config next to its own prefix, and
+  honours `GLUEWC_DATADIR`, so a custom `--prefix` and a Nix store path seed
+  `~/.config/gluewc/config.conf` like a distribution install does
 
 - BSP direct manipulation: Mod-drag no longer tears a tiled window out into a
   float, it hands the window the tile it is dropped on and the two trade

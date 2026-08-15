@@ -66,7 +66,7 @@ clean:
 dist: clean
 	mkdir -p gluewc-$(VERSION)
 	cp -R .github docs LICENSE* Makefile CHANGELOG.md CONTRIBUTING.md \
-		README.md SECURITY.md install.sh client.h config.def.h \
+		README.md SECURITY.md install.sh flake.nix client.h config.def.h \
 		config.def.conf config.mk protocols gluewc.1 gluewc.c util.c util.h \
 		gluewc.desktop gluewc-session gluewc-$(VERSION)
 	tar -caf gluewc-$(VERSION).tar.gz gluewc-$(VERSION)

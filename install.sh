@@ -7,6 +7,7 @@ PREFIX=${PREFIX:-/usr/local}
 SESSIONDIR=${SESSIONDIR:-/usr/share/wayland-sessions}
 DESTDIR=${DESTDIR:-}
 WITH_DEPS=1
+WITH_AUDIO=1
 DEPS_ONLY=0
 DRY_RUN=0
 UNINSTALL=0
@@ -18,6 +19,9 @@ Usage: install.sh [options]
 
   --prefix PATH    installation prefix (default: /usr/local)
   --no-deps        do not install or build dependencies
+  --no-audio       do not install PipeWire, WirePlumber and their ALSA and
+                   PulseAudio bridges (they are installed by default so that
+                   sound works in the session out of the box)
   --deps-only      install dependencies, then stop
   --dry-run        print the package-manager command without running it
   --uninstall      remove gluewc from the selected prefix
@@ -83,6 +87,10 @@ while [ "$#" -gt 0 ]; do
 		WITH_DEPS=0
 		shift
 		;;
+	--no-audio)
+		WITH_AUDIO=0
+		shift
+		;;
 	--deps-only)
 		DEPS_ONLY=1
 		shift
@@ -134,14 +142,104 @@ fi
 
 DISTRO=" ${ID:-unknown} ${ID_LIKE:-} "
 
-install_packages() {
+family_by_pm() {
+	# Derivatives that carry neither a known ID nor a known ID_LIKE still
+	# have a package manager, and that is enough to pick the right list.
+	if command -v nixos-rebuild >/dev/null 2>&1; then
+		printf 'nixos'
+	elif command -v pacman >/dev/null 2>&1; then
+		printf 'arch'
+	elif command -v apt-get >/dev/null 2>&1; then
+		printf 'debian'
+	elif command -v dnf >/dev/null 2>&1 || command -v dnf5 >/dev/null 2>&1; then
+		printf 'fedora'
+	elif command -v zypper >/dev/null 2>&1; then
+		printf 'suse'
+	elif command -v emerge >/dev/null 2>&1; then
+		printf 'gentoo'
+	elif command -v xbps-install >/dev/null 2>&1; then
+		printf 'void'
+	elif command -v apk >/dev/null 2>&1; then
+		printf 'alpine'
+	else
+		printf 'unknown'
+	fi
+}
+
+detect_family() {
 	case "$DISTRO" in
-	*arch*|*manjaro*)
+	*nixos*)
+		printf 'nixos' ;;
+	*arch*|*manjaro*|*artix*|*endeavouros*|*cachyos*|*garuda*|*arcolinux*)
+		printf 'arch' ;;
+	*debian*|*ubuntu*|*devuan*|*linuxmint*|*pop*|*elementary*|*zorin*|*kali*|*raspbian*)
+		printf 'debian' ;;
+	*fedora*|*rhel*|*centos*|*nobara*|*rocky*|*almalinux*)
+		printf 'fedora' ;;
+	*suse*|*opensuse*)
+		printf 'suse' ;;
+	*gentoo*)
+		printf 'gentoo' ;;
+	*alpine*|*postmarketos*)
+		printf 'alpine' ;;
+	*void*)
+		printf 'void' ;;
+	*)
+		family_by_pm ;;
+	esac
+}
+
+FAMILY=$(detect_family)
+
+# Sound is part of a working desktop, so PipeWire, WirePlumber and the ALSA
+# and PulseAudio bridges are installed with everything else. gluewc-session
+# starts whichever of them it finds. --no-audio skips this.
+audio_packages() {
+	[ "$WITH_AUDIO" -eq 1 ] || return 0
+	case "$1" in
+	arch)   printf 'pipewire wireplumber pipewire-pulse pipewire-alsa' ;;
+	debian) printf 'pipewire wireplumber pipewire-pulse pipewire-alsa' ;;
+	fedora) printf 'pipewire wireplumber pipewire-pulseaudio pipewire-alsa' ;;
+	suse)   printf 'pipewire wireplumber pipewire-pulseaudio pipewire-alsa' ;;
+	gentoo) printf 'media-video/pipewire media-video/wireplumber' ;;
+	alpine) printf 'pipewire wireplumber pipewire-pulse pipewire-alsa' ;;
+	void)   printf 'pipewire wireplumber alsa-pipewire' ;;
+	esac
+}
+
+nixos_instructions() {
+	cat <<'EOF'
+
+NixOS builds gluewc from the flake in this repository instead of installing
+loose packages, so this script does not touch the system:
+
+  nix run     github:vladbiber/gluewc                    # the compositor
+  nix shell   github:vladbiber/gluewc -c gluewc-session  # a full session
+  nix develop github:vladbiber/gluewc                    # a shell for make
+
+System-wide, add the flake to your configuration and enable the module:
+
+  inputs.gluewc.url = "github:vladbiber/gluewc";
+  imports = [ inputs.gluewc.nixosModules.default ];
+  programs.gluewc.enable = true;              # session entry + PipeWire audio
+
+docs/INSTALL.md has the full configuration.nix example. Inside a
+'nix develop' shell this script still works with --no-deps.
+EOF
+}
+
+install_packages() {
+	case "$FAMILY" in
+	nixos)
+		nixos_instructions
+		exit 0
+		;;
+	arch)
 		set -- pacman -Syu --needed --noconfirm base-devel git meson ninja \
 			pkgconf wayland wayland-protocols libinput libxkbcommon libxcb \
 			xcb-util-wm libdrm mesa pixman seatd wlroots0.19 xorg-xwayland
 		;;
-	*debian*|*ubuntu*)
+	debian)
 		if [ "$DRY_RUN" -eq 0 ]; then
 			run_root apt-get update
 		fi
@@ -156,7 +254,7 @@ install_packages() {
 			libxcb-xfixes0-dev libxcb-xinput-dev libxcb-errors-dev \
 			hwdata xwayland
 		;;
-	*fedora*|*rhel*|*centos*)
+	fedora)
 		set -- dnf install -y gcc make git meson ninja-build \
 			pkgconf-pkg-config wayland-devel wayland-protocols-devel \
 			libinput-devel libxkbcommon-devel pixman-devel libdrm-devel \
@@ -166,7 +264,7 @@ install_packages() {
 			xcb-util-errors-devel xcb-util-renderutil-devel hwdata \
 			wlroots-devel xorg-x11-server-Xwayland
 		;;
-	*suse*|*opensuse*)
+	suse)
 		set -- zypper --non-interactive install -t pattern devel_basis \
 			git meson ninja pkg-config wayland-devel wayland-protocols-devel \
 			libinput-devel libxkbcommon-devel pixman-devel libdrm-devel \
@@ -176,20 +274,20 @@ install_packages() {
 			xcb-util-errors-devel xcb-util-renderutil-devel wlroots-devel \
 			xwayland
 		;;
-	*gentoo*)
+	gentoo)
 		set -- emerge --noreplace --ask=n dev-vcs/git dev-build/meson \
 			dev-build/ninja virtual/pkgconfig dev-libs/wayland \
 			dev-libs/wayland-protocols dev-libs/libinput \
 			x11-libs/libxkbcommon x11-libs/libxcb x11-libs/xcb-util-wm \
 			gui-libs/wlroots:0.19 gui-libs/scenefx:0.4 x11-base/xwayland
 		;;
-	*alpine*)
+	alpine)
 		set -- apk add build-base git meson ninja pkgconf wayland-dev \
 			wayland-protocols libinput-dev libxkbcommon-dev libxcb-dev \
 			xcb-util-wm-dev libdrm-dev mesa-dev pixman-dev seatd-dev \
 			wlroots0.19-dev scenefx-dev xwayland
 		;;
-	*void*)
+	void)
 		set -- xbps-install -Sy base-devel git meson ninja pkg-config \
 			wayland-devel wayland-protocols libinput-devel \
 			libxkbcommon-devel pixman-devel libdrm-devel MesaLib-devel \
@@ -199,9 +297,12 @@ install_packages() {
 			wlroots-devel xorg-server-xwayland
 		;;
 	*)
-		die "unsupported distribution '${ID:-unknown}'; use --no-deps after installing the requirements manually"
+		die "no package list for '${ID:-unknown}' and no known package manager found; install the requirements from docs/INSTALL.md and rerun with --no-deps"
 		;;
 	esac
+
+	# shellcheck disable=SC2046  # the package list is deliberately split
+	set -- "$@" $(audio_packages "$FAMILY")
 
 	if [ "$DRY_RUN" -eq 1 ]; then
 		show_command "$@"
@@ -210,13 +311,37 @@ install_packages() {
 	fi
 }
 
+enable_audio() {
+	# Only systemd distributions have user units to enable; everywhere else
+	# gluewc-session starts the daemons itself when it finds them.
+	[ "$WITH_AUDIO" -eq 1 ] || return 0
+	command -v systemctl >/dev/null 2>&1 || return 0
+	if [ "$(id -u)" -eq 0 ]; then
+		warn "running as root: enable the audio units from your own account with"
+		warn "  systemctl --user enable --now pipewire.socket pipewire-pulse.socket wireplumber.service"
+		return 0
+	fi
+	log "Enabling PipeWire for $(id -un)"
+	systemctl --user daemon-reload >/dev/null 2>&1 || true
+	systemctl --user enable --now pipewire.socket pipewire-pulse.socket \
+		wireplumber.service >/dev/null 2>&1 \
+		|| warn "could not enable the PipeWire user units; gluewc-session starts them at login instead"
+}
+
 if [ "$WITH_DEPS" -eq 1 ]; then
-	log "Installing build dependencies for ${PRETTY_NAME:-${ID:-Linux}}"
+	if [ "$FAMILY" = nixos ]; then
+		: # install_packages prints the flake instructions and stops
+	elif [ "$WITH_AUDIO" -eq 1 ]; then
+		log "Installing build dependencies and audio for ${PRETTY_NAME:-${ID:-Linux}} (family: $FAMILY)"
+	else
+		log "Installing build dependencies for ${PRETTY_NAME:-${ID:-Linux}} (family: $FAMILY)"
+	fi
 	install_packages
 	if [ "$DRY_RUN" -eq 1 ]; then
 		printf '\nDry run complete; no changes were made.\n'
 		exit 0
 	fi
+	enable_audio
 fi
 
 for tool in cc make git meson ninja pkg-config; do

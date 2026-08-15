@@ -36,8 +36,9 @@ It is a fork of [dwl 0.8](https://codeberg.org/dwl/dwl), using
 
 ## Install
 
-The installer detects the distribution, installs build dependencies, builds a
-compatible SceneFX/wlroots pair when needed, and installs the session entry:
+The installer detects the distribution, installs build dependencies and audio,
+builds a compatible SceneFX/wlroots pair when needed, and installs the session
+entry:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/vladbiber/gluewc/main/install.sh | sh
@@ -57,20 +58,54 @@ The dependency resolver covers current releases of:
 
 | Family | Target |
 | --- | --- |
-| Arch | Arch Linux, EndeavourOS, Manjaro |
-| Debian | Debian 13+ |
-| Ubuntu | Ubuntu 25.10+ and derivatives |
-| Fedora | Fedora 43+ |
-| SUSE | openSUSE Tumbleweed |
+| Arch | Arch Linux, EndeavourOS, Manjaro, CachyOS, Garuda, Artix, ArcoLinux |
+| Debian | Debian 13+, Devuan |
+| Ubuntu | Ubuntu 25.10+, Mint, Pop!\_OS, elementary, Zorin, Kali, Raspberry Pi OS |
+| Fedora | Fedora 43+, Nobara, RHEL, CentOS Stream, Rocky, AlmaLinux |
+| SUSE | openSUSE Tumbleweed and Leap |
 | Gentoo | Gentoo Linux |
-| Alpine | Alpine Edge |
+| Alpine | Alpine Edge, postmarketOS |
 | Void | Void Linux rolling |
+| NixOS | through the flake in this repository |
 
-Gentoo is hardware-tested and the Arch path is exercised by CI. The remaining
-resolvers target their current package sets. Older distributions may not have
-the Wayland, libdrm and Pixman versions required by SceneFX 0.4; see
+A distribution outside the list still works: the installer falls back to
+whichever package manager it finds on `PATH` and uses that family's package
+set. Gentoo is hardware-tested and the Arch path is exercised by CI. The
+remaining resolvers target their current package sets. Older distributions may
+not have the Wayland, libdrm and Pixman versions required by SceneFX 0.4; see
 [the installation guide](docs/INSTALL.md) for manual and troubleshooting
 instructions.
+
+Sound is set up along the way: PipeWire, WirePlumber and the ALSA and
+PulseAudio bridges are installed and, where there are systemd user units,
+enabled. Pass `--no-audio` to keep your own audio stack.
+
+### NixOS
+
+```sh
+nix run github:vladbiber/gluewc          # try it without installing
+```
+
+Permanently, add the flake as an input and enable the module, which registers
+the session and sets up PipeWire, the portals and Xwayland:
+
+```nix
+imports = [ inputs.gluewc.nixosModules.default ];
+programs.gluewc.enable = true;
+```
+
+### From source
+
+```sh
+git clone https://github.com/vladbiber/gluewc.git
+cd gluewc
+./install.sh --deps-only     # or install the dependencies yourself
+make
+sudo make install
+```
+
+[The installation guide](docs/INSTALL.md) covers `PREFIX`, `DESTDIR`,
+`config.h`, building against a private wlroots and staying up to date.
 
 After installation, log out and select **gluewc** in the display manager. From
 a TTY, run:
