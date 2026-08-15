@@ -287,9 +287,8 @@ typedef struct {
 
 typedef struct {
 	struct wlr_scene_tree *tree;
-	Monitor *mon;
-	float scale, opacity;
-	int x, y, radius;
+	float scalex, scaley, opacity;
+	int srcx, srcy, x, y, radius, count;
 } OverviewClone;
 
 typedef struct {
@@ -2696,6 +2695,9 @@ overviewclone(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 {
 	OverviewClone *oc = data;
 	struct wlr_scene_buffer *clone;
+	struct wlr_scene_buffer_set_buffer_options options;
+	enum corner_location corners;
+	float scale;
 	int width, height, radius;
 
 	if (!buffer->buffer)
@@ -2709,21 +2711,34 @@ overviewclone(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 	if (width <= 0 || height <= 0)
 		return;
 
-	clone = wlr_scene_buffer_create(oc->tree, buffer->buffer);
+	options = (struct wlr_scene_buffer_set_buffer_options){
+		.wait_timeline = buffer->WLR_PRIVATE.wait_timeline,
+		.wait_point = buffer->WLR_PRIVATE.wait_point,
+	};
+	clone = wlr_scene_buffer_create(oc->tree, NULL);
+	wlr_scene_buffer_set_buffer_with_options(clone, buffer->buffer, &options);
 	if (buffer->src_box.width > 0 && buffer->src_box.height > 0)
 		wlr_scene_buffer_set_source_box(clone, &buffer->src_box);
 	wlr_scene_buffer_set_transform(clone, buffer->transform);
-	wlr_scene_buffer_set_dest_size(clone, MAX(1, (int)roundf(width * oc->scale)),
-			MAX(1, (int)roundf(height * oc->scale)));
+	wlr_scene_buffer_set_dest_size(clone, MAX(1, (int)roundf(width * oc->scalex)),
+			MAX(1, (int)roundf(height * oc->scaley)));
 	wlr_scene_buffer_set_opacity(clone, buffer->opacity * oc->opacity);
 	wlr_scene_buffer_set_filter_mode(clone, WLR_SCALE_FILTER_BILINEAR);
-	radius = oc->radius > 0 ? oc->radius
-			: MAX(0, (int)roundf(buffer->corner_radius * oc->scale));
-	if (radius > 0)
-		wlr_scene_buffer_set_corner_radius(clone, radius, CORNER_LOCATION_ALL);
+	scale = MIN(oc->scalex, oc->scaley);
+	radius = oc->radius >= 0 ? oc->radius
+			: MAX(0, (int)roundf(buffer->corner_radius * scale));
+	corners = oc->radius >= 0 ? CORNER_LOCATION_ALL : buffer->corners;
+	wlr_scene_buffer_set_corner_radius(clone, radius, corners);
+	wlr_scene_buffer_set_backdrop_blur(clone, buffer->backdrop_blur);
+	wlr_scene_buffer_set_backdrop_blur_optimized(clone,
+			buffer->backdrop_blur_optimized);
+	wlr_scene_buffer_set_backdrop_blur_ignore_transparent(clone,
+			buffer->backdrop_blur_ignore_transparent);
+	wlr_scene_buffer_set_opaque_region(clone, &buffer->opaque_region);
 	wlr_scene_node_set_position(&clone->node,
-			oc->x + (int)roundf((sx - oc->mon->m.x) * oc->scale),
-			oc->y + (int)roundf((sy - oc->mon->m.y) * oc->scale));
+			oc->x + (int)roundf((sx - oc->srcx) * oc->scalex),
+			oc->y + (int)roundf((sy - oc->srcy) * oc->scaley));
+	oc->count++;
 }
 
 static struct wlr_box
@@ -2745,39 +2760,50 @@ overviewwindowbox(Monitor *m, Client *c, const struct wlr_box *panel)
 
 static void
 overviewwindowdraw(struct wlr_scene_tree *tree, Client *c,
-		const struct wlr_box *box, float scale, float opacity)
+		const struct wlr_box *box, float opacity)
 {
 	float shadowcolor[] = {0.0f, 0.0f, 0.0f, 0.55f * opacity};
 	float windowcolor[] = {0.055f * opacity, 0.055f * opacity,
 		0.065f * opacity, 0.96f * opacity};
-	struct wlr_scene_buffer *clone;
+	struct wlr_scene_tree *content;
 	struct wlr_scene_rect *back;
 	struct wlr_scene_shadow *shadow;
-	int inset = MAX(1, (int)roundf(MAX(1u, c->bw) * scale));
-	int radius = MAX(3, (int)roundf(MAX(4, corner_radius) * scale));
+	OverviewClone oc;
+	float scale;
+	int enabled, radius;
 
 	if (opacity <= 0.0f)
 		return;
+	scale = MIN((float)box->width / MAX(1, c->geom.width),
+			(float)box->height / MAX(1, c->geom.height));
+	radius = MAX(3, (int)roundf(MAX(4, corner_radius) * scale));
 	shadow = wlr_scene_shadow_create(tree, box->width, box->height,
 			radius, 12.0f, shadowcolor);
 	wlr_scene_node_set_position(&shadow->node, box->x, box->y + 3);
-	back = wlr_scene_rect_create(tree, box->width, box->height, windowcolor);
+	content = wlr_scene_tree_create(tree);
+	back = wlr_scene_rect_create(content, box->width, box->height, windowcolor);
 	wlr_scene_rect_set_corner_radius(back, radius, CORNER_LOCATION_ALL);
 	wlr_scene_node_set_position(&back->node, box->x, box->y);
 
-	if (!c->surfbuf || !c->surfbuf->buffer)
+	if (!c->scene)
 		return;
-	clone = wlr_scene_buffer_create(tree, c->surfbuf->buffer);
-	if (c->surfbuf->src_box.width > 0 && c->surfbuf->src_box.height > 0)
-		wlr_scene_buffer_set_source_box(clone, &c->surfbuf->src_box);
-	wlr_scene_buffer_set_transform(clone, c->surfbuf->transform);
-	wlr_scene_buffer_set_dest_size(clone, MAX(1, box->width - 2 * inset),
-			MAX(1, box->height - 2 * inset));
-	wlr_scene_buffer_set_opacity(clone, opacity);
-	wlr_scene_buffer_set_filter_mode(clone, WLR_SCALE_FILTER_BILINEAR);
-	wlr_scene_buffer_set_corner_radius(clone, MAX(2, radius - inset),
-			CORNER_LOCATION_ALL);
-	wlr_scene_node_set_position(&clone->node, box->x + inset, box->y + inset);
+	oc = (OverviewClone){
+		.tree = content,
+		.scalex = (float)box->width / MAX(1, c->geom.width),
+		.scaley = (float)box->height / MAX(1, c->geom.height),
+		.opacity = opacity,
+		.srcx = c->scene->node.x, .srcy = c->scene->node.y,
+		.x = box->x, .y = box->y,
+		.radius = -1,
+	};
+	enabled = c->scene->node.enabled;
+	if (!enabled)
+		wlr_scene_node_set_enabled(&c->scene->node, 1);
+	wlr_scene_node_for_each_buffer(&c->scene->node, overviewclone, &oc);
+	if (!enabled)
+		wlr_scene_node_set_enabled(&c->scene->node, 0);
+	if (oc.count)
+		wlr_scene_node_destroy(&back->node);
 }
 
 static void
@@ -2785,10 +2811,8 @@ overviewwindow(struct wlr_scene_tree *tree, Monitor *m, Client *c,
 		const struct wlr_box *panel, float opacity)
 {
 	struct wlr_box box = overviewwindowbox(m, c, panel);
-	float scale = MIN((float)panel->width / m->w.width,
-			(float)panel->height / m->w.height);
 
-	overviewwindowdraw(tree, c, &box, scale, opacity);
+	overviewwindowdraw(tree, c, &box, opacity);
 }
 
 static void
@@ -2809,9 +2833,11 @@ overviewpanel(Monitor *m, unsigned int ws, const struct wlr_box *box, float opac
 		return;
 	tree = wlr_scene_tree_create(overview_panels_scene);
 	oc = (OverviewClone){
-		.tree = tree, .mon = m,
-		.scale = (float)box->width / m->m.width,
+		.tree = tree,
+		.scalex = (float)box->width / m->m.width,
+		.scaley = (float)box->height / m->m.height,
 		.opacity = opacity,
+		.srcx = m->m.x, .srcy = m->m.y,
 		.x = box->x, .y = box->y,
 		.radius = MAX(6, (int)roundf(16.0f * box->width / m->m.width)),
 	};
@@ -3162,8 +3188,6 @@ overviewmotion(void)
 {
 	Monitor *m;
 	Client *c;
-	struct wlr_box geo;
-	float scale;
 
 	if (!overview_visible)
 		return 0;
@@ -3174,15 +3198,9 @@ overviewmotion(void)
 				|| fabs(cursor->y - overview_press_y) >= 7.0)) {
 			overview_dragging = 1;
 			overviewdragclear();
-			geo = (overview_drag_client->isfullscreen
-					|| overview_drag_client->isfakefull)
-					? overview_drag_client->prev : overview_drag_client->geom;
-			scale = geo.width > 0 && geo.height > 0
-					? MIN((float)overview_drag_box.width / geo.width,
-						(float)overview_drag_box.height / geo.height) : 1.0f;
 			overview_drag_box.x = overview_drag_box.y = 0;
 			overviewwindowdraw(overview_drag_scene, overview_drag_client,
-					&overview_drag_box, scale, 0.96f);
+					&overview_drag_box, 0.96f);
 			overviewbuild();
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "grabbing");
 		}
