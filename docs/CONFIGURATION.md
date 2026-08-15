@@ -1,8 +1,34 @@
 # Configuration
 
 gluewc reads `~/.config/gluewc/config.conf`. The installed session creates it
-from `config.def.conf` on first login. Unknown settings are logged and ignored.
-Press `Super+Shift+R` after editing; gluewc reloads the file in place.
+from `config.def.conf` on first login.
+
+## Saving applies
+
+The file is watched, so saving it is all it takes — the new settings and
+keybinds are live about a tenth of a second later, with no restart and nothing
+to press. Editors that write a temporary file and rename it over the original
+are handled too, which is what vim and most others do. `Super+Shift+R` still
+forces a reload, and remains the way to reload after editing the file from
+somewhere the watch cannot see, such as a different machine over a network
+mount.
+
+A line the parser rejects is skipped, and everything that did parse still
+applies — a typo can never leave the session without keybinds. To make sure a
+mistake is not missed, gluewc reports it three ways:
+
+- a red strip across the top of the screen for five seconds, which needs
+  nothing installed,
+- a `notify-send` notification naming the line and what was wrong with it, when
+  a notification daemon is running,
+- a line in `~/.local/state/gluewc.log`, always:
+
+```text
+config:24: bad bind 'mod+NoSuchKey = spawn:true'
+config:31: unknown key 'nonsens'
+```
+
+The same report appears at login when the config was already broken.
 
 ## Appearance
 
@@ -144,6 +170,33 @@ Actions:
 | `wm:move_to_workspace:N` | move without following |
 | `wm:move_to_workspace_follow:N` | move and follow |
 | `wm:move_to_workspace_prev/next` | move to an adjacent workspace |
+
+## Media, volume and backlight
+
+The function row carries the media keys, so it works on keyboards that have
+none or that hide them behind `Fn`. `XF86Audio*` and `XF86MonBrightness*` keep
+working as they always did, and normal mode has the same keys without `Super`.
+
+| Binding | Action |
+| --- | --- |
+| `Super+F1` | play / pause |
+| `Super+F2`, `Super+F3` | previous, next |
+| `Super+Shift+F2`, `Super+Shift+F3` | seek 10 seconds back, forward |
+| `Super+F4`, `Super+Shift+F4` | mute output, mute microphone |
+| `Super+F5`, `Super+F6` | volume down, up |
+| `Super+F7`, `Super+F8` | backlight down, up |
+
+The commands pick the helper that is installed rather than insisting on one:
+`wpctl` (WirePlumber, present on any PipeWire system) before `pactl`, and
+`brightnessctl` before `light`. Playback uses `playerctl`. They are ordinary
+`spawn:` binds, so replacing one is a single line:
+
+```ini
+bind_insert = mod+F6 = spawn:pamixer -i 5
+```
+
+Volume up is capped at 100% with `wpctl -l 1.0`; drop the flag if you want the
+software boost above it.
 
 ## Overview and gestures
 

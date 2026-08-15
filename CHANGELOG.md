@@ -4,6 +4,22 @@
 
 ### Added
 
+- Media, volume and backlight on the function row: Mod-F1 plays and pauses,
+  Mod-F2 and Mod-F3 step through tracks, Mod-Shift-F2 and Mod-Shift-F3 seek,
+  Mod-F4 to Mod-F6 mute and change the volume, Mod-Shift-F4 mutes the
+  microphone, and Mod-F7 and Mod-F8 drive the backlight — so a keyboard
+  without media keys, or with them behind Fn, can still reach all of it.
+  Normal mode has the same keys without Mod
+- The volume and backlight commands pick the helper that is installed instead
+  of insisting on one: `wpctl`, which ships with WirePlumber, before `pactl`,
+  and `brightnessctl` before `light`
+- Saving the config applies it: `~/.config/gluewc/config.conf` is watched and
+  reloaded on the spot, including when an editor writes a temporary file and
+  renames it over the original
+- A line the config parser rejects is reported rather than only logged: a red
+  strip across the top of the screen, a `notify-send` notification naming the
+  line, and a log entry with its number. Everything that did parse still
+  applies, so a typo cannot leave the session without keybinds
 - NixOS support through a flake: a package, an overlay, a `nix develop` shell
   and a `programs.gluewc` NixOS module that registers the session with the
   display manager and sets up PipeWire, the portals and Xwayland
@@ -17,12 +33,32 @@
 - A detailed git-and-make build walkthrough in the installation guide, covering
   `PREFIX`, `DESTDIR`, `config.h`, private wlroots builds and staying up to date
 
+### Fixed
+
+- Clicks landed in the wrong place in the drift layout at any zoom other than
+  1:1, and the error grew with the zoom until parts of a window stopped
+  responding at all. wlroots hit-tests a scaled buffer in destination pixels
+  and hands the result to the client as surface coordinates, which only agree
+  while nothing is scaled; the camera zoom is now divided back out before the
+  point is compared against the input region and passed on
+- A window that left the canvas kept its zoomed buffers, and with them the
+  wrong hit test, until it next committed
+- The drift clip was a border width too large, so a window's own content was
+  drawn over its right and bottom border
+- A drift window whose client never acknowledged a resize held the canvas at a
+  size the client was not painting at for as long as it lived; the pending
+  resize now expires like the frame it holds up
+- A drift window that takes its real size after mapping, which is the first
+  thing a browser does, is resized around its middle, so it keeps the place it
+  was given instead of walking out of it
+
 ### Changed
 
+- Mod-F1 to Mod-F3 replace the bare F1 to F3 media binds in insert mode, which
+  gives applications their function keys back
 - `gluewc-session` looks for its default config next to its own prefix, and
   honours `GLUEWC_DATADIR`, so a custom `--prefix` and a Nix store path seed
   `~/.config/gluewc/config.conf` like a distribution install does
-
 - BSP direct manipulation: Mod-drag no longer tears a tiled window out into a
   float, it hands the window the tile it is dropped on and the two trade
   places in the tree; Mod-right-drag moves the splits the window sits between

@@ -132,6 +132,20 @@ static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TA
 /* helper for spawning shell commands in the pre dwm-5.0 fashion */
 #define SHCMD(cmd) { .v = (const char*[]){ "/bin/sh", "-c", cmd, NULL } }
 
+/* Volume and backlight are driven by whichever helper is installed: wpctl
+ * comes with WirePlumber and is there on any PipeWire system, pactl with the
+ * PulseAudio tools, and the backlight is either brightnessctl or light. */
+#define VOLCMD(wp, pa) SHCMD("if command -v wpctl >/dev/null 2>&1; then " \
+	"wpctl " wp "; else pactl " pa "; fi")
+#define BRTCMD(bc, li) SHCMD("if command -v brightnessctl >/dev/null 2>&1; then " \
+	"brightnessctl " bc "; else light " li "; fi")
+#define VOLUP   VOLCMD("set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+", "set-sink-volume @DEFAULT_SINK@ +5%")
+#define VOLDOWN VOLCMD("set-volume @DEFAULT_AUDIO_SINK@ 5%-", "set-sink-volume @DEFAULT_SINK@ -5%")
+#define VOLMUTE VOLCMD("set-mute @DEFAULT_AUDIO_SINK@ toggle", "set-sink-mute @DEFAULT_SINK@ toggle")
+#define MICMUTE VOLCMD("set-mute @DEFAULT_AUDIO_SOURCE@ toggle", "set-source-mute @DEFAULT_SOURCE@ toggle")
+#define BRTUP   BRTCMD("set +10%", "-A 10")
+#define BRTDOWN BRTCMD("set 10%-", "-U 10")
+
 /* commands */
 static const char *termcmd[] = { "alacritty", NULL };
 static const char *menucmd[] = { "rofi", "-show", "drun", NULL };
@@ -143,9 +157,6 @@ static const Key keys[] = {
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,           {0} },
 	{ MODKEY,                    XKB_KEY_space,      spawn,          {.v = menucmd} },
 	{ 0,                         XKB_KEY_Print,      spawn,          SHCMD("grim") },
-	{ 0,                         XKB_KEY_F1,         spawn,          SHCMD("playerctl play-pause") },
-	{ 0,                         XKB_KEY_F2,         spawn,          SHCMD("playerctl previous") },
-	{ 0,                         XKB_KEY_F3,         spawn,          SHCMD("playerctl next") },
 	{ MODKEY,                    XKB_KEY_c,          killclient,     {0} },
 	{ MODKEY,                    XKB_KEY_Escape,     entermode,      {.i = ModeNormal} },
 	{ MODKEY,                    XKB_KEY_Tab,        focusnext,      {0} },
@@ -189,14 +200,30 @@ static const Key keys[] = {
 	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Page_Up,    movewsstep,     {.i = -1} },
 	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Page_Down,  movewsstep,     {.i = +1} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_r,          reloadconfig,   {0} },
-	{ 0, XKB_KEY_XF86AudioRaiseVolume,  spawn, SHCMD("pactl set-sink-volume @DEFAULT_SINK@ +5%") },
-	{ 0, XKB_KEY_XF86AudioLowerVolume,  spawn, SHCMD("pactl set-sink-volume @DEFAULT_SINK@ -5%") },
-	{ 0, XKB_KEY_XF86AudioMute,         spawn, SHCMD("pactl set-sink-mute @DEFAULT_SINK@ toggle") },
+	/* Media keys, and the same actions on the function row for keyboards
+	 * that have no media keys or hide them behind Fn. */
+	{ 0, XKB_KEY_XF86AudioRaiseVolume,  spawn, VOLUP },
+	{ 0, XKB_KEY_XF86AudioLowerVolume,  spawn, VOLDOWN },
+	{ 0, XKB_KEY_XF86AudioMute,         spawn, VOLMUTE },
+	{ 0, XKB_KEY_XF86AudioMicMute,      spawn, MICMUTE },
 	{ 0, XKB_KEY_XF86AudioPlay,         spawn, SHCMD("playerctl play-pause") },
+	{ 0, XKB_KEY_XF86AudioPause,        spawn, SHCMD("playerctl play-pause") },
+	{ 0, XKB_KEY_XF86AudioStop,         spawn, SHCMD("playerctl stop") },
 	{ 0, XKB_KEY_XF86AudioNext,         spawn, SHCMD("playerctl next") },
 	{ 0, XKB_KEY_XF86AudioPrev,         spawn, SHCMD("playerctl previous") },
-	{ 0, XKB_KEY_XF86MonBrightnessUp,   spawn, SHCMD("brightnessctl set +10%") },
-	{ 0, XKB_KEY_XF86MonBrightnessDown, spawn, SHCMD("brightnessctl set 10%-") },
+	{ 0, XKB_KEY_XF86MonBrightnessUp,   spawn, BRTUP },
+	{ 0, XKB_KEY_XF86MonBrightnessDown, spawn, BRTDOWN },
+	{ MODKEY,                    XKB_KEY_F1, spawn, SHCMD("playerctl play-pause") },
+	{ MODKEY,                    XKB_KEY_F2, spawn, SHCMD("playerctl previous") },
+	{ MODKEY,                    XKB_KEY_F3, spawn, SHCMD("playerctl next") },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_F2, spawn, SHCMD("playerctl position 10-") },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_F3, spawn, SHCMD("playerctl position 10+") },
+	{ MODKEY,                    XKB_KEY_F4, spawn, VOLMUTE },
+	{ MODKEY,                    XKB_KEY_F5, spawn, VOLDOWN },
+	{ MODKEY,                    XKB_KEY_F6, spawn, VOLUP },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_F4, spawn, MICMUTE },
+	{ MODKEY,                    XKB_KEY_F7, spawn, BRTDOWN },
+	{ MODKEY,                    XKB_KEY_F8, spawn, BRTUP },
 	WSKEYS(XKB_KEY_1, 0),
 	WSKEYS(XKB_KEY_2, 1),
 	WSKEYS(XKB_KEY_3, 2),
@@ -232,9 +259,16 @@ static const Key normalkeys[] = {
 	{ 0, XKB_KEY_H,     swapstack,   {.i = -1} },
 	{ 0, XKB_KEY_L,     swapstack,   {.i = +1} },
 	{ 0, XKB_KEY_s,     togglesplit, {0} },
+	/* the function row without Mod, since normal mode already owns the
+	 * keyboard; the same order as the Mod bindings in insert mode */
 	{ 0, XKB_KEY_F1,    spawn, SHCMD("playerctl play-pause") },
 	{ 0, XKB_KEY_F2,    spawn, SHCMD("playerctl previous") },
 	{ 0, XKB_KEY_F3,    spawn, SHCMD("playerctl next") },
+	{ 0, XKB_KEY_F4,    spawn, VOLMUTE },
+	{ 0, XKB_KEY_F5,    spawn, VOLDOWN },
+	{ 0, XKB_KEY_F6,    spawn, VOLUP },
+	{ 0, XKB_KEY_F7,    spawn, BRTDOWN },
+	{ 0, XKB_KEY_F8,    spawn, BRTUP },
 };
 
 static const Button buttons[] = {

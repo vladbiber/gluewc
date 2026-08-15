@@ -2,11 +2,13 @@
  * See LICENSE file for copyright and license details.
  */
 #include <getopt.h>
+#include <sys/inotify.h>
 #include <limits.h>
 #include <libinput.h>
 #include <linux/input-event-codes.h>
 #include <math.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -196,6 +198,7 @@ struct Client {
 	} anim;
 	uint32_t resize; /* configure serial of a pending resize */
 	uint32_t resizeat; /* when that serial was sent, in ms */
+	double bufscale; /* scale painted on this client's buffers, 1 = untouched */
 };
 
 typedef struct {
@@ -498,6 +501,12 @@ static void pointerfocus(Client *c, struct wlr_surface *surface,
 static void powermgrsetmode(struct wl_listener *listener, void *data);
 static void quit(const Arg *arg);
 static void readconfig(void);
+static void cfgerror(const char *fmt, ...);
+static int cfgerrorhide(void *data);
+static void cfgerrorshow(void);
+static void cfgwatch(void);
+static int cfgwatchevent(int fd, uint32_t mask, void *data);
+static int cfgwatchfire(void *data);
 static void reloadconfig(const Arg *arg);
 static void rendermon(struct wl_listener *listener, void *data);
 static void requestdecorationmode(struct wl_listener *listener, void *data);
@@ -593,6 +602,16 @@ static struct wl_list close_anims;
 static int overview_active;
 static int overview_visible;
 static struct wl_event_source *overview_watchdog;
+/* config file watch: the file is reloaded as soon as an editor closes it, and
+ * anything the parser rejected is reported instead of only reaching the log */
+static int cfg_wd = -1;
+static struct wl_event_source *cfg_watch_src, *cfg_watch_delay;
+static struct wlr_scene_rect *cfg_errbar;
+static struct wl_event_source *cfg_errbar_timer;
+static int cfg_nerrors;
+static int cfg_errline, cfg_curline;
+static char cfg_errmsg[192];
+static char cfg_path[512];
 static int overview_button_swallow;
 static double overview_swipe_dx, overview_swipe_dy;
 static int overview_swipe_active, overview_swipe_triggered;
@@ -2719,6 +2738,35 @@ driftcollect(struct wlr_surface *surface, int sx, int sy, void *data)
 	}
 }
 
+/* the hit test wlroots installs on a scene surface, kept so the clip it
+ * applies keeps being applied after the scale correction below */
+static wlr_scene_buffer_point_accepts_input_func_t wlr_point_accepts_input;
+
+static bool
+driftpointinput(struct wlr_scene_buffer *buffer, double *sx, double *sy)
+{
+	/* wlroots hit-tests a buffer in destination pixels and hands the result
+	 * to the client as surface coordinates, which only agree while nothing
+	 * is scaled.  A scaled buffer therefore needs the scale divided back
+	 * out first, otherwise every click lands zoom times too far into the
+	 * window and the input region covers the wrong part of it. */
+	struct wlr_scene_surface *s = wlr_scene_surface_try_from_buffer(buffer);
+	struct wlr_scene_node *n;
+	Client *c = NULL;
+	double z = 1.0;
+
+	if (!s)
+		return false;
+	for (n = &buffer->node; n && !c; n = n->parent ? &n->parent->node : NULL)
+		c = n->data;
+	if (c && c->type != LayerShell && c->bufscale > 0.0)
+		z = c->bufscale;
+	*sx /= z;
+	*sy /= z;
+	return wlr_point_accepts_input ? wlr_point_accepts_input(buffer, sx, sy)
+			: wlr_surface_point_accepts_input(s->surface, *sx, *sy);
+}
+
 static void
 driftscalebuf(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 {
@@ -2728,6 +2776,12 @@ driftscalebuf(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 
 	if (!s)
 		return;
+	/* every buffer this pass touches gets the scale-aware hit test, and
+	 * keeps it: at 1:1 it behaves exactly like the one wlroots installs */
+	if (buffer->point_accepts_input
+			&& buffer->point_accepts_input != driftpointinput)
+		wlr_point_accepts_input = buffer->point_accepts_input;
+	buffer->point_accepts_input = driftpointinput;
 	for (i = 0; i < ds->n && ds->list[i].surface != s->surface; i++);
 	if (i == ds->n)
 		return;
@@ -2799,8 +2853,10 @@ driftscaleclient(Client *c, double z)
 	if (!c->scene || !c->scene_surface || !client_surface(c)->mapped)
 		return;
 	client_get_clip(c, &clip);
-	clip.width = MAX(1, c->canvas.width - bw);
-	clip.height = MAX(1, c->canvas.height - bw);
+	/* the clip is the size the client was configured with, borders excluded */
+	clip.width = MAX(1, c->canvas.width - 2 * bw);
+	clip.height = MAX(1, c->canvas.height - 2 * bw);
+	c->bufscale = z;
 	driftscalesurface(c->scene_surface, client_surface(c), z, bw, bw, &clip);
 #ifdef XWAYLAND
 	if (c->type != XDGShell)
@@ -2836,6 +2892,7 @@ clientscale(Client *c, float z)
 	client_get_clip(c, &clip);
 	driftscalesurface(c->scene_surface, client_surface(c), z, bw, bw, &clip);
 	c->anim.scale = z;
+	c->bufscale = z;
 }
 
 void
@@ -2846,9 +2903,10 @@ clientunscale(Client *c)
 	struct wlr_box clip;
 	int bw = (int)c->bw, r;
 
-	if (c->anim.scale == 0.0f || c->anim.scale >= 1.0f)
+	if ((c->anim.scale == 0.0f || c->anim.scale >= 1.0f) && c->bufscale == 1.0)
 		return;
 	c->anim.scale = 1.0f;
+	c->bufscale = 1.0;
 	if (!c->scene || !c->scene_surface || !client_surface(c)->mapped)
 		return;
 	r = (c->isfullscreen || c->isfakefull) ? 0
@@ -3331,10 +3389,25 @@ commitnotify(struct wl_listener *listener, void *data)
 		/* on the canvas the client owns its size: follow whatever it asked
 		 * for, then place that box under the camera again */
 		struct wlr_box geo, box;
+		int w, h;
 		client_get_geometry(c, &geo);
+		/* a client that never acks a configure would otherwise hold the
+		 * canvas at a size it is not painting at, for as long as it lives */
+		if (c->resize && now_ms() - c->resizeat > RESIZEWAIT)
+			c->resize = 0;
 		if (!c->resize && geo.width > 0 && geo.height > 0) {
-			c->canvas.width = geo.width + 2 * (int)c->bw;
-			c->canvas.height = geo.height + 2 * (int)c->bw;
+			w = geo.width + 2 * (int)c->bw;
+			h = geo.height + 2 * (int)c->bw;
+			/* Growing to its real size is the first thing a client like a
+			 * browser does after mapping, and it would walk out of the
+			 * centre it was placed in.  Resizing around the middle keeps
+			 * it where it was put, wherever that is. */
+			if (c->canvassized) {
+				c->canvas.x -= (w - c->canvas.width) / 2;
+				c->canvas.y -= (h - c->canvas.height) / 2;
+			}
+			c->canvas.width = w;
+			c->canvas.height = h;
 			c->canvassized = 1;
 		}
 		driftscreen(c->mon, c, &box);
@@ -3618,6 +3691,7 @@ createnotify(struct wl_listener *listener, void *data)
 	c = toplevel->base->data = ecalloc(1, sizeof(*c));
 	c->surface.xdg = toplevel->base;
 	c->bw = borderpx;
+	c->bufscale = 1.0;
 
 	LISTEN(&toplevel->base->surface->events.client_commit, &c->precommit,
 			precommitnotify);
@@ -6241,6 +6315,11 @@ resize(Client *c, struct wlr_box geo, int interact)
 		clientborders(c, c->geom.width, c->geom.height, (int)c->bw, r);
 	}
 
+	/* a window that left the canvas keeps its scaled buffers until it next
+	 * commits, which is long enough to click on the wrong place */
+	if (!drifted && c->bufscale != 1.0 && !c->anim.active)
+		clientunscale(c);
+
 	/* this is a no-op if size hasn't changed */
 	if (drifted) {
 		/* the client is sized in canvas pixels; the camera zoom is applied
@@ -6257,8 +6336,8 @@ resize(Client *c, struct wlr_box geo, int interact)
 	c->resize = serial;
 	client_get_clip(c, &clip);
 	if (drifted) {
-		clip.width = MAX(1, c->canvas.width - (int)c->bw);
-		clip.height = MAX(1, c->canvas.height - (int)c->bw);
+		clip.width = MAX(1, c->canvas.width - 2 * (int)c->bw);
+		clip.height = MAX(1, c->canvas.height - 2 * (int)c->bw);
 	}
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 	if (drifted && (driftz(c->mon, c->ws) != 1.0 || c->mon->driftscaled))
@@ -6278,6 +6357,9 @@ run(char *startup_cmd)
 	 * master, etc */
 	if (!wlr_backend_start(backend))
 		die("startup: backend_start");
+
+	/* a config that was already broken at login is worth saying out loud */
+	cfgerrorshow();
 
 	/* Now that the socket exists and the backend is started, run the startup command */
 	if (startup_cmd) {
@@ -6514,7 +6596,7 @@ cfganimtype(const char *s)
 		return AnimFade;
 	if (!strcmp(s, "none") || !strcmp(s, "false"))
 		return AnimNone;
-	wlr_log(WLR_ERROR, "config: unknown animation type '%s'", s);
+	cfgerror("unknown animation type '%s'", s);
 	return AnimZoom;
 }
 
@@ -6526,7 +6608,7 @@ cfgcurve(const char *s, float out[4])
 	float c[4];
 
 	if (sscanf(s, "%f , %f , %f , %f", &c[0], &c[1], &c[2], &c[3]) != 4) {
-		wlr_log(WLR_ERROR, "config: bad curve '%s', want x1,y1,x2,y2", s);
+		cfgerror("bad curve '%s', want x1,y1,x2,y2", s);
 		return 0;
 	}
 	out[0] = MIN(1.0f, MAX(0.0f, c[0]));
@@ -6678,6 +6760,162 @@ cfgaddbind(Bind **arr, size_t *n, uint32_t mods, xkb_keysym_t sym,
 	(*arr)[i].arg = arg;
 }
 
+void
+cfgerror(const char *fmt, ...)
+{
+	/* the first complaint is the one worth showing: after a typo the rest
+	 * is usually the same mistake repeated */
+	va_list ap;
+	char msg[160];
+	size_t i;
+
+	va_start(ap, fmt);
+	vsnprintf(msg, sizeof msg, fmt, ap);
+	va_end(ap);
+	wlr_log(WLR_ERROR, "config:%d: %s", cfg_curline, msg);
+	if (cfg_nerrors++)
+		return;
+	/* the message ends up inside a shell command below */
+	for (i = 0; msg[i]; i++)
+		if (msg[i] == '\'' || msg[i] == '\\' || msg[i] == '\n')
+			msg[i] = ' ';
+	cfg_errline = cfg_curline;
+	snprintf(cfg_errmsg, sizeof cfg_errmsg, "%s", msg);
+}
+
+int
+cfgerrorhide(void *data)
+{
+	if (cfg_errbar) {
+		wlr_scene_node_destroy(&cfg_errbar->node);
+		cfg_errbar = NULL;
+	}
+	return 0;
+}
+
+void
+cfgerrorshow(void)
+{
+	/* There is no text renderer here, so the compositor cannot spell the
+	 * problem out on screen itself: it raises a red strip, which needs
+	 * nothing installed and is impossible to miss, and passes the message
+	 * to notify-send when a notification daemon is running.  The log line
+	 * above has the details either way. */
+	const float red[] = {0.85f, 0.15f, 0.18f, 0.9f};
+	Monitor *m = selmon;
+	char cmd[512];
+	const char *argv[] = {"/bin/sh", "-c", cmd, NULL};
+	Arg a = {.v = argv};
+
+	if (!cfg_nerrors)
+		return;
+	if (!m && !wl_list_empty(&mons))
+		m = wl_container_of(mons.next, m, link);
+	if (m && m->w.width > 0) {
+		cfgerrorhide(NULL);
+		if ((cfg_errbar = wlr_scene_rect_create(layers[LyrOverlay],
+				m->w.width, MAX(3, m->w.height / 96), red))) {
+			wlr_scene_node_set_position(&cfg_errbar->node, m->w.x, m->w.y);
+			if (!cfg_errbar_timer)
+				cfg_errbar_timer = wl_event_loop_add_timer(event_loop,
+						cfgerrorhide, NULL);
+			if (cfg_errbar_timer)
+				wl_event_source_timer_update(cfg_errbar_timer, 5000);
+		}
+	}
+	snprintf(cmd, sizeof cmd, "command -v notify-send >/dev/null 2>&1 && "
+			"notify-send -u critical 'gluewc: %d config error%s' "
+			"'line %d: %s'", cfg_nerrors, cfg_nerrors > 1 ? "s" : "",
+			cfg_errline, cfg_errmsg);
+	spawn(&a);
+}
+
+int
+cfgwatchfire(void *data)
+{
+	reloadconfig(NULL);
+	return 0;
+}
+
+int
+cfgwatchevent(int fd, uint32_t mask, void *data)
+{
+	union {
+		struct inotify_event ev;
+		char buf[4096];
+	} u;
+	const struct inotify_event *ev;
+	const char *name = strrchr(cfg_path, '/');
+	ssize_t len;
+	char *pos;
+	int hit = 0, gone = 0;
+
+	name = name ? name + 1 : cfg_path;
+	while ((len = read(fd, u.buf, sizeof u.buf)) > 0) {
+		for (pos = u.buf; pos < u.buf + len; pos += sizeof(*ev) + ev->len) {
+			ev = (const struct inotify_event *)pos;
+			if (ev->len && !strcmp(ev->name, name)) {
+				hit = 1;
+			} else if (!ev->len && (ev->mask & (IN_MOVE_SELF | IN_DELETE_SELF))) {
+				/* the directory was replaced under us: follow it.
+				 * Nameless events are otherwise the watch's own
+				 * bookkeeping — IN_IGNORED after a rearm above all —
+				 * and reloading on those never stops. */
+				gone = 1;
+			}
+		}
+	}
+	if (gone) {
+		cfg_wd = -1;
+		cfgwatch();
+	}
+	if (!hit)
+		return 0;
+	/* editors touch the file several times in a row; one reload once the
+	 * dust settles is enough, and it never runs from inside the read */
+	if (!cfg_watch_delay)
+		cfg_watch_delay = wl_event_loop_add_timer(event_loop, cfgwatchfire, NULL);
+	if (cfg_watch_delay)
+		wl_event_source_timer_update(cfg_watch_delay, 150);
+	return 0;
+}
+
+void
+cfgwatch(void)
+{
+	/* Watching the directory rather than the file is what makes this work
+	 * with editors at all: most of them write a temporary file and rename
+	 * it over the config, which drops any watch on the file itself. */
+	static int fd = -1;
+	static char watched[512];
+	char dir[512], *slash;
+
+	if (!event_loop || !*cfg_path)
+		return;
+	snprintf(dir, sizeof dir, "%s", cfg_path);
+	if (!(slash = strrchr(dir, '/')))
+		return;
+	*slash = '\0';
+	/* rearming an intact watch only produces another event to react to */
+	if (cfg_wd >= 0 && !strcmp(watched, dir))
+		return;
+	if (fd < 0 && (fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC)) < 0) {
+		wlr_log(WLR_ERROR, "config: inotify_init1:");
+		return;
+	}
+	if (cfg_wd >= 0)
+		inotify_rm_watch(fd, cfg_wd);
+	if ((cfg_wd = inotify_add_watch(fd, dir, IN_CLOSE_WRITE | IN_MOVED_TO
+			| IN_CREATE | IN_MOVE_SELF | IN_DELETE_SELF)) < 0) {
+		wlr_log(WLR_ERROR, "config: cannot watch %s", dir);
+		return;
+	}
+	snprintf(watched, sizeof watched, "%s", dir);
+	if (!cfg_watch_src)
+		cfg_watch_src = wl_event_loop_add_fd(event_loop, fd,
+				WL_EVENT_READABLE, cfgwatchevent, NULL);
+}
+
 static const char *
 layoutname(unsigned int lt)
 {
@@ -6762,18 +7000,27 @@ readconfig(void)
 		cfgaddbind(&runnormalkeys, &nrunnormalkeys, normalkeys[i].mod,
 				normalkeys[i].keysym, normalkeys[i].func, normalkeys[i].arg);
 
+	cfg_nerrors = 0;
+	cfg_curline = 0;
+	cfg_errline = 0;
+	cfg_errmsg[0] = '\0';
+
 	if ((env = getenv("XDG_CONFIG_HOME")))
 		snprintf(path, sizeof path, "%s/gluewc/config.conf", env);
 	else if ((env = getenv("HOME")))
 		snprintf(path, sizeof path, "%s/.config/gluewc/config.conf", env);
 	else
 		return;
+	snprintf(cfg_path, sizeof cfg_path, "%s", path);
+	/* watch even when there is no config yet: writing one applies it */
+	cfgwatch();
 	if (!(f = fopen(path, "r"))) {
 		loadlayoutstate();
 		return;
 	}
 
 	while (getline(&line, &lsz, f) != -1) {
+		cfg_curline++;
 		k = cfgtrim(line);
 		if (!*k || *k == '#')
 			continue;
@@ -6787,13 +7034,17 @@ readconfig(void)
 			xkb_keysym_t sym;
 			void (*func)(const Arg *);
 			Arg arg = {0};
+			char combo[96];
 			if (!(v2 = strchr(v, '=')))
 				continue;
 			*v2++ = '\0';
 			v = cfgtrim(v);
 			v2 = cfgtrim(v2);
+			/* cfgbindcombo() tokenises in place, so the error below
+			 * would otherwise report only up to the first plus */
+			snprintf(combo, sizeof combo, "%s", v);
 			if (!cfgbindcombo(v, &mods, &sym) || !cfgaction(v2, &func, &arg)) {
-				wlr_log(WLR_ERROR, "config: bad bind '%s = %s'", v, v2);
+				cfgerror("bad bind '%s = %s'", combo, v2);
 				continue;
 			}
 			if (!strcmp(k, "bind_insert"))
@@ -6885,7 +7136,7 @@ readconfig(void)
 				die("config: realloc:");
 			autostarts[nautostarts++] = strdup(v);
 		} else {
-			wlr_log(WLR_ERROR, "config: unknown key '%s'", k);
+			cfgerror("unknown key '%s'", k);
 		}
 	}
 	free(line);
@@ -6915,6 +7166,8 @@ setup(void)
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
+	/* the first readconfig() ran before there was an event loop to watch on */
+	cfgwatch();
 	overview_watchdog = wl_event_loop_add_timer(event_loop, overviewwatchdog, NULL);
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
@@ -7178,6 +7431,7 @@ reloadconfig(const Arg *arg)
 	runkeys = runnormalkeys = NULL;
 	nrunkeys = nrunnormalkeys = 0;
 	readconfig();
+	cfgerrorshow();
 	wl_list_for_each(m, &mons, link)
 		animstop(m);
 
@@ -7840,6 +8094,7 @@ createnotifyx11(struct wl_listener *listener, void *data)
 	c = xsurface->data = ecalloc(1, sizeof(*c));
 	c->surface.xwayland = xsurface;
 	c->type = X11;
+	c->bufscale = 1.0;
 	c->bw = client_is_unmanaged(c) ? 0 : borderpx;
 
 	/* Listen to the various events it can emit */

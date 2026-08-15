@@ -28,7 +28,8 @@ It is a fork of [dwl 0.8](https://codeberg.org/dwl/dwl), using
 - Three-finger workspace and overview gestures
 - Directional keyboard focus; crossing the left or right edge changes workspace
 - Insert and normal keyboard modes inspired by modal window managers
-- Runtime config and keybind reload without recompiling
+- Runtime config and keybind reload without recompiling, applied as soon as the
+  file is saved and reported on screen when a line does not parse
 - Rounded corners, blur and optional transparency through SceneFX
 - XWayland, layer-shell, session lock and output power-management support
 - dwl IPC and foreign-toplevel support for bars and desktop shells
@@ -114,14 +115,16 @@ a TTY, run:
 gluewc-session
 ```
 
-The default bindings expect `alacritty`, `rofi`, `grim`, `pactl`, `playerctl`
-and `brightnessctl`. They are optional and every command can be replaced in
-the runtime config.
+The default bindings expect `alacritty`, `rofi`, `grim`, `playerctl`, and for
+volume and backlight either `wpctl`/`pactl` and `brightnessctl`/`light`. They
+are optional and every command can be replaced in the runtime config.
 
 ## First steps
 
 The session wrapper creates `~/.config/gluewc/config.conf` on first login.
-Edit it and press `Super+Shift+R` to reload.
+Saving it applies it: the file is watched and reloaded on the spot, and
+anything the parser rejects raises a red strip across the top of the screen
+and a notification naming the line. `Super+Shift+R` still reloads by hand.
 
 | Binding | Action |
 | --- | --- |
@@ -145,8 +148,26 @@ Edit it and press `Super+Shift+R` to reload.
 | `Super+C` | Close window |
 | `Super+O` | Toggle configured transparency |
 | `Super+Escape` | Enter normal mode; `I` returns to insert mode |
-| `Super+Shift+R` | Reload config in place |
+| `Super+Shift+R` | Reload config in place (it also reloads itself when saved) |
 | `Super+M` or `Super+Shift+Q` | Quit gluewc |
+
+Media, volume and backlight sit on the function row, so they work on keyboards
+without media keys or with them behind `Fn`. The media keys themselves keep
+doing the same thing, and in normal mode the same keys need no `Super`.
+
+| Binding | Action |
+| --- | --- |
+| `Super+F1` | Play / pause |
+| `Super+F2` / `Super+F3` | Previous / next track |
+| `Super+Shift+F2` / `Super+Shift+F3` | Seek 10s back / forward |
+| `Super+F4` / `Super+Shift+F4` | Mute output / microphone |
+| `Super+F5` / `Super+F6` | Volume down / up |
+| `Super+F7` / `Super+F8` | Backlight down / up |
+
+Playback needs `playerctl`. Volume goes through `wpctl` (part of WirePlumber,
+so it is there on any PipeWire system) and falls back to `pactl`; the backlight
+uses `brightnessctl` and falls back to `light`. Every one of these is a plain
+`spawn:` line in the config, so they can be pointed at anything else.
 
 In the overview, use arrows, workspace numbers, the mouse wheel or a two-finger
 horizontal swipe to navigate. Click a window to focus it, or drag it onto the
