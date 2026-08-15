@@ -22,7 +22,28 @@ static int blur_radius                     = 5;
 static float win_opacity                   = 1.0f; /* window opacity when transparency is on */
 static int opacityenabled                  = 1;  /* toggled at runtime with wm:toggle_opacity */
 static int animations                      = 1;  /* position animations (open/retile/workspace) */
-static int animation_duration              = 200; /* ms */
+static int animation_duration              = 200; /* ms, retile and workspace moves */
+/* how a window appears and disappears: AnimZoom pops it out of its own centre,
+ * AnimSlide moves it in from below, AnimFade only fades, AnimNone is instant */
+static int animation_type_open             = AnimZoom;
+static int animation_type_close            = AnimZoom;
+static int animation_duration_open         = 300; /* ms */
+static int animation_duration_close        = 250; /* ms */
+static float zoom_initial_ratio            = 0.72f; /* size an opening window starts at */
+static float zoom_end_ratio                = 0.76f; /* size a closing window ends at */
+/* cubic-bezier control points, as in CSS: x1, y1, x2, y2 */
+static float animation_curve_open[4]       = {0.16f, 1.0f, 0.3f, 1.0f};  /* ease out, snappy */
+static float animation_curve_close[4]      = {0.42f, 0.0f, 0.6f, 1.0f};  /* ease in out */
+static float scroll_colfrac                = 0.5f; /* default column width in the niri-style scroll layout */
+static int default_layout                  = LtBSP; /* layout new monitors start in: LtBSP, LtScroll or LtDrift */
+static int remember_layout                 = 1;     /* reopen in the layout the last session ended in */
+/* drift layout — driftwm-style infinite canvas */
+static int drift_snap                      = 24;    /* edge snapping distance, in canvas pixels */
+static int drift_nudge                     = 20;    /* pixels a window moves per keyboard nudge */
+static float drift_zoom_min                = 0.2f;  /* how far the camera can zoom out */
+static float drift_zoom_max                = 3.0f;  /* how far the camera can zoom in */
+static float drift_zoom_step               = 1.12f; /* zoom factor per key press or wheel notch */
+static float drift_pan_speed               = 1.0f;  /* multiplier for touchpad and scroll panning */
 /* This conforms to the xdg-protocol. Set the alpha to zero to restore the old behavior */
 static const float fullscreen_bg[]         = {0.0f, 0.0f, 0.0f, 1.0f}; /* You can also use glsl colors */
 
@@ -131,6 +152,10 @@ static const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_f,          togglefakefullscreen, {0} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_f,          togglefullscreen, {0} },
 	{ MODKEY,                    XKB_KEY_v,          togglefloating, {0} },
+	{ MODKEY,                    XKB_KEY_m,          quit,           {0} },
+	{ MODKEY,                    XKB_KEY_n,          togglelayout,   {0} },
+	{ MODKEY,                    XKB_KEY_comma,      consumewin,     {0} },
+	{ MODKEY,                    XKB_KEY_period,     expelwin,       {0} },
 	{ MODKEY,                    XKB_KEY_b,          toggledecor,    {0} },
 	{ MODKEY,                    XKB_KEY_o,          toggleopacity,  {0} },
 	{ MODKEY,                    XKB_KEY_Left,       focusdir,       {.i = DirLeft} },
@@ -145,10 +170,16 @@ static const Key keys[] = {
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Right,      swapdir,        {.i = DirRight} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,         swapdir,        {.i = DirUp} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,       swapdir,        {.i = DirDown} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Left,       swapdir,        {.i = DirLeft} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Right,      swapdir,        {.i = DirRight} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Up,         swapdir,        {.i = DirUp} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Down,       swapdir,        {.i = DirDown} },
+	/* pans the camera in the drift layout, swaps windows everywhere else */
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Left,       driftpankey,    {.i = DirLeft} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Right,      driftpankey,    {.i = DirRight} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Up,         driftpankey,    {.i = DirUp} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Down,       driftpankey,    {.i = DirDown} },
+	{ MODKEY,                    XKB_KEY_w,          driftfit,       {0} },
+	{ MODKEY,                    XKB_KEY_plus,       driftzoomkey,   {.f = +1.0f} },
+	{ MODKEY,                    XKB_KEY_equal,      driftzoomkey,   {.f = +1.0f} },
+	{ MODKEY,                    XKB_KEY_minus,      driftzoomkey,   {.f = -1.0f} },
+	{ MODKEY,                    XKB_KEY_0,          driftzoomkey,   {.f = 0.0f} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_h,          swapdir,        {.i = DirLeft} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_l,          swapdir,        {.i = DirRight} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_k,          swapdir,        {.i = DirUp} },
@@ -210,4 +241,13 @@ static const Button buttons[] = {
 	{ MODKEY, BTN_LEFT,   moveresize,     {.ui = CurMove} },
 	{ MODKEY, BTN_MIDDLE, togglefloating, {0} },
 	{ MODKEY, BTN_RIGHT,  moveresize,     {.ui = CurResize} },
+	/* drag the canvas itself around in the drift layout; in the other
+	 * layouts there is no camera, so the click goes to the application */
+	{ MODKEY|WLR_MODIFIER_SHIFT, BTN_LEFT, driftpan, {0} },
+	/* driftwm keeps window dragging on Alt; these only bind in the drift
+	 * layout, so Alt+click keeps working inside applications elsewhere.
+	 * Shift takes the whole snapped cluster along. */
+	{ WLR_MODIFIER_ALT, BTN_LEFT,  moveresize, {.ui = CurMove} },
+	{ WLR_MODIFIER_ALT, BTN_RIGHT, moveresize, {.ui = CurResize} },
+	{ WLR_MODIFIER_ALT|WLR_MODIFIER_SHIFT, BTN_LEFT, moveresize, {.ui = CurDriftMove} },
 };

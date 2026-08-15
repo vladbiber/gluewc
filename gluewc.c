@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -83,13 +84,22 @@
 #define NUMWS                   9
 #define LISTEN(E, L, H)         wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
+#define SCROLLLT(M)             ((M) && (M)->lt == LtScroll)
+#define LTMIGRATE(C, M, WS)     ((C)->mon == (M) && (C)->ws == (WS) \
+                                && client_surface(C)->mapped && !client_is_unmanaged(C))
+#define DRIFTLT(M)              ((M) && (M)->lt == LtDrift)
+#define RESIZEWAIT              300 /* ms an unacked resize may hold up a frame */
 
 /* enums */
-enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
+enum { CurNormal, CurPressed, CurMove, CurResize,
+       CurDragTile, CurResizeCol, CurDriftMove, CurDriftResize,
+       CurDriftPan }; /* cursor */
+enum { LtBSP, LtScroll, LtDrift, LtLast }; /* per-monitor layouts */
 enum { XDGShell, LayerShell, X11 }; /* client types */
 enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS }; /* scene layers */
 enum { ModeInsert, ModeNormal }; /* input modes */
 enum { DirLeft, DirRight, DirUp, DirDown }; /* focus/swap directions */
+enum { AnimNone, AnimFade, AnimSlide, AnimZoom }; /* open/close animation */
 
 typedef union {
 	int i;
@@ -114,6 +124,15 @@ struct Node {
 	float ratio;
 	Node *a, *b, *par;
 	Client *c;
+};
+
+/* one column of the niri-style scrolling layout */
+typedef struct Column Column;
+struct Column {
+	struct wl_list link;    /* Monitor.cols[ws] */
+	struct wl_list clients; /* Client.clink, top to bottom */
+	float wfrac;            /* width as a fraction of the window area */
+	float prevfrac;         /* width to restore after a maximize toggle */
 };
 
 struct Client {
@@ -161,13 +180,21 @@ struct Client {
 	unsigned int bw;
 	unsigned int ws;
 	Node *node;
+	Column *col;          /* scroll layout column, NULL while in a BSP tree */
+	int canvassized;      /* canvas holds the window's real size, not a screen box */
+	struct wl_list clink; /* position inside Column.clients */
+	struct wlr_box canvas; /* drift layout: unscaled canvas rect, includes border */
+	int oncanvas;          /* 1 while the client lives on a drift canvas */
 	int isfloating, isfullscreen, isfakefull;
 	struct {
 		int active, fadein, workspace, hide, closing;
+		int zoom;    /* the open animation also scales the window up */
+		float scale; /* scale currently painted on the tree, 1 = untouched */
 		float t; /* progress 0..1, advanced only on rendered frames */
 		struct wlr_box from, to; /* only x/y are used */
 	} anim;
 	uint32_t resize; /* configure serial of a pending resize */
+	uint32_t resizeat; /* when that serial was sent, in ms */
 };
 
 typedef struct {
@@ -236,8 +263,15 @@ struct Monitor {
 	struct wl_list layers[4]; /* LayerSurface.link */
 	unsigned int ws; /* current workspace */
 	Node *tree[NUMWS]; /* BSP tree per workspace */
+	unsigned int lt; /* LtBSP, LtScroll (niri-style) or LtDrift (infinite canvas) */
+	struct wl_list cols[NUMWS]; /* Column.link per workspace (scroll layout) */
+	int scrollx[NUMWS]; /* horizontal scroll offset per workspace */
+	/* drift layout: one camera over an infinite canvas per workspace */
+	double camx[NUMWS], camy[NUMWS], camz[NUMWS];
+	int driftscaled; /* the visible windows are currently drawn zoomed */
 	int gamma_lut_changed;
 	uint32_t lastanimtick;
+	struct wl_event_source *unblock; /* wakes the output when a client stalls */
 	int asleep;
 	struct wlr_box overview[3];
 	struct wlr_box overview_from[3];
@@ -308,15 +342,18 @@ typedef struct {
 } CloseAnim;
 
 /* function declarations */
+static float animease(const float *curve, float t);
 static void animkick(Monitor *m);
 static void animstop(Monitor *m);
 static void applybounds(Client *c, struct wlr_box *bbox);
 static void applyeffects(Client *c);
+static void applyfakefull(Client *c);
 static void applyrules(Client *c);
 static void arrange(Monitor *m);
 static void arrangelayer(Monitor *m, struct wl_list *list,
 		struct wlr_box *usable_area, int exclusive);
 static void arrangelayers(Monitor *m);
+static void attachclient(Monitor *m, unsigned int ws, Client *c);
 static void axisnotify(struct wl_listener *listener, void *data);
 static void bsp_attach(Monitor *m, unsigned int ws, Client *c);
 static void bsp_detach(Client *c);
@@ -328,7 +365,10 @@ static void bsp_tile(Node *n, struct wlr_box box);
 static void buttonpress(struct wl_listener *listener, void *data);
 static void chvt(const Arg *arg);
 static void checkidleinhibitor(struct wlr_surface *exclude);
+static void clientborders(Client *c, int width, int height, int bw, int radius);
 static float clientopacity(Client *c);
+static void clientscale(Client *c, float z);
+static void clientunscale(Client *c);
 static int closeanimadvance(Monitor *m, float dt);
 static void closeanimclear(Monitor *m);
 static int closeanimstart(struct wlr_scene_node *node,
@@ -343,6 +383,7 @@ static void commitnotify(struct wl_listener *listener, void *data);
 static void precommitlayersurfacenotify(struct wl_listener *listener, void *data);
 static void precommitnotify(struct wl_listener *listener, void *data);
 static void commitpopup(struct wl_listener *listener, void *data);
+static void consumewin(const Arg *arg);
 static void createdecoration(struct wl_listener *listener, void *data);
 static void createidleinhibitor(struct wl_listener *listener, void *data);
 static void createkeyboard(struct wlr_keyboard *keyboard);
@@ -367,8 +408,34 @@ static void destroynotify(struct wl_listener *listener, void *data);
 static void destroypointerconstraint(struct wl_listener *listener, void *data);
 static void destroysessionlock(struct wl_listener *listener, void *data);
 static void destroykeyboardgroup(struct wl_listener *listener, void *data);
+static void detachclient(Client *c);
 static Client *dirpick(Monitor *m, Client *from, int dir);
+static void driftapply(Monitor *m);
+static void driftarrange(Monitor *m);
+static void driftattach(Monitor *m, unsigned int ws, Client *c);
+static void driftbounds(Monitor *m, unsigned int ws, int withview, struct wlr_box *out);
+static int driftcluster(Client *c, Client **out, int max);
+static void driftdetach(Client *c);
+static void driftdragto(Client *c, double cx, double cy);
+static void driftfit(const Arg *arg);
+static void driftmove(Client *c, int dx, int dy, int cluster);
+static void driftnudge(const Arg *arg);
+static void driftpan(const Arg *arg);
+static void driftpanto(double cx, double cy);
+static void driftpankey(const Arg *arg);
+static Client *driftpick(Monitor *m, Client *from, int dir);
+static void driftresizeto(Client *c, double cx, double cy);
+static void driftreveal(Monitor *m, Client *c);
+static void driftscaleclient(Client *c, double z);
+static void driftscreen(Monitor *m, Client *c, struct wlr_box *out);
+static void driftsnap(Monitor *m, Client *c, struct wlr_box *box);
+static void drifttile(Monitor *m);
+static int drifttiled(Client *c, Monitor *m, unsigned int ws);
+static double driftz(Monitor *m, unsigned int ws);
+static void driftzoomkey(const Arg *arg);
+static void driftzoomto(Monitor *m, double z, double ax, double ay);
 static void entermode(const Arg *arg);
+static void expelwin(const Arg *arg);
 static void focusclient(Client *c, int lift);
 static const float *focuscolorfor(void);
 static void focusdir(const Arg *arg);
@@ -412,10 +479,13 @@ static int overviewkey(xkb_keysym_t sym);
 static int overviewmotion(void);
 static void overviewnavigate(unsigned int ws, int dir);
 static void overviewrelayout(void);
+static void overviewfinish(void);
 static void overviewset(int active);
 static void overviewtoggle(const Arg *arg);
 static int overviewvalid(Monitor *m);
 static void workspacestep(int dir);
+static void gesturebegin(uint32_t fingers);
+static void gestureupdate(uint32_t fingers, double dx, double dy);
 static void swipebeginnotify(struct wl_listener *listener, void *data);
 static void swipeendnotify(struct wl_listener *listener, void *data);
 static void swipeupdatenotify(struct wl_listener *listener, void *data);
@@ -431,10 +501,31 @@ static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
 static void resize(Client *c, struct wlr_box geo, int interact);
 static void run(char *startup_cmd);
+static Column *scroll_addcol(Monitor *m, unsigned int ws, struct wl_list *pos);
+static void scroll_addclient(Column *col, Client *c, unsigned int ws);
+static void scroll_attach(Monitor *m, unsigned int ws, Client *c);
+static int scroll_coltiled(Column *col);
+static int scroll_colwidth(Monitor *m, Column *col);
+static void scroll_detach(Client *c);
+static void scroll_dragto(Client *c, double cx);
+static void scroll_maximize(Client *sel);
+static Client *scroll_next(Monitor *m, Client *sel);
+static void scroll_swap(Client *sel, int dir);
+static void scroll_tile(Monitor *m);
+static void swipefocus(int dir);
+static void overviewfocuscol(int dir);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setcursorshape(struct wl_listener *listener, void *data);
 static void setfloating(Client *c, int floating);
 static void setfullscreen(Client *c, int fullscreen);
+static void setlayout(Monitor *m, unsigned int lt);
+static int layoutstatepath(char *buf, size_t size);
+static void loadlayoutstate(void);
+static void savelayoutstate(unsigned int lt);
+static void setlayoutarg(const Arg *arg);
+static void pinchbeginnotify(struct wl_listener *listener, void *data);
+static void pinchendnotify(struct wl_listener *listener, void *data);
+static void pinchupdatenotify(struct wl_listener *listener, void *data);
 static void setmon(Client *c, Monitor *m, int ws);
 static void setpsel(struct wl_listener *listener, void *data);
 static void setratio(const Arg *arg);
@@ -446,6 +537,7 @@ static void swapdir(const Arg *arg);
 static void swapnodes(Client *sel, Client *t);
 static void swapstack(const Arg *arg);
 static void toggledecor(const Arg *arg);
+static void togglelayout(const Arg *arg);
 static void togglefakefullscreen(const Arg *arg);
 static void togglefloating(const Arg *arg);
 static void togglefullscreen(const Arg *arg);
@@ -459,6 +551,8 @@ static void viewws(const Arg *arg);
 static void virtualkeyboard(struct wl_listener *listener, void *data);
 static void virtualpointer(struct wl_listener *listener, void *data);
 static void warpto(Client *c);
+static Client *wsfocused(Monitor *m, unsigned int ws);
+static Client *wsfocusedany(Monitor *m, unsigned int ws);
 static void wsstep(const Arg *arg);
 static Monitor *xytomon(double x, double y);
 static void xytonode(double x, double y, struct wlr_surface **psurface,
@@ -494,10 +588,8 @@ static struct wlr_scene_tree *overview_drag_scene;
 static struct wl_list close_anims;
 static int overview_active;
 static int overview_visible;
+static struct wl_event_source *overview_watchdog;
 static int overview_button_swallow;
-static double overview_axis_dx, overview_axis_dy;
-static uint32_t overview_axis_time;
-static int overview_axis_triggered;
 static double overview_swipe_dx, overview_swipe_dy;
 static int overview_swipe_active, overview_swipe_triggered;
 static Client *overview_drag_client;
@@ -544,6 +636,15 @@ static KeyboardGroup *super_group;
 static unsigned int cursor_mode;
 static Client *grabc;
 static int grabcx, grabcy; /* client-relative */
+static double grab_startx; /* cursor x at the start of a column resize or canvas pan */
+static double grab_starty; /* cursor y at the start of a canvas pan */
+static float grab_wfrac;   /* column width when the resize started */
+static Monitor *grabm;     /* monitor whose camera a canvas pan is dragging */
+static double grab_camx, grab_camy; /* camera position when the pan started */
+static int lt_migrating;   /* set while windows move between layouts */
+static int drift_dragcluster; /* the running drag moves the whole snapped cluster */
+static double drift_pinch_zoom, drift_pinch_x, drift_pinch_y;
+static int drift_pinch_done;
 
 static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
@@ -556,6 +657,9 @@ static struct wl_listener cursor_button = {.notify = buttonpress};
 static struct wl_listener cursor_frame = {.notify = cursorframe};
 static struct wl_listener cursor_motion = {.notify = motionrelative};
 static struct wl_listener cursor_motion_absolute = {.notify = motionabsolute};
+static struct wl_listener cursor_pinch_begin = {.notify = pinchbeginnotify};
+static struct wl_listener cursor_pinch_end = {.notify = pinchendnotify};
+static struct wl_listener cursor_pinch_update = {.notify = pinchupdatenotify};
 static struct wl_listener cursor_swipe_begin = {.notify = swipebeginnotify};
 static struct wl_listener cursor_swipe_end = {.notify = swipeendnotify};
 static struct wl_listener cursor_swipe_update = {.notify = swipeupdatenotify};
@@ -601,6 +705,48 @@ static struct wlr_xwayland *xwayland;
 #include "client.h"
 
 /* function implementations */
+static int
+monunblock(void *data)
+{
+	/* a client sat on its configure long enough to freeze the output: come
+	 * back and draw the frame without it */
+	Monitor *m = data;
+
+	if (m->wlr_output->enabled)
+		wlr_output_schedule_frame(m->wlr_output);
+	return 0;
+}
+
+float
+animease(const float *curve, float t)
+{
+	/* CSS cubic-bezier(x1, y1, x2, y2): the curve runs from (0,0) to (1,1),
+	 * so x(u) is solved for the wanted time and y(u) is the eased progress.
+	 * Newton converges in a couple of steps for the usual control points. */
+	float u = t, x, dx, mu;
+	int i;
+
+	if (t <= 0.0f)
+		return 0.0f;
+	if (t >= 1.0f)
+		return 1.0f;
+	for (i = 0; i < 8; i++) {
+		mu = 1.0f - u;
+		x = 3.0f * mu * mu * u * curve[0] + 3.0f * mu * u * u * curve[2]
+				+ u * u * u;
+		dx = 3.0f * mu * mu * curve[0]
+				+ 6.0f * mu * u * (curve[2] - curve[0])
+				+ 3.0f * u * u * (1.0f - curve[2]);
+		if (fabsf(x - t) < 0.0005f || fabsf(dx) < 1e-5f)
+			break;
+		u -= (x - t) / dx;
+		u = u < 0.0f ? 0.0f : u > 1.0f ? 1.0f : u;
+	}
+	mu = 1.0f - u;
+	return 3.0f * mu * mu * u * curve[1] + 3.0f * mu * u * u * curve[3]
+			+ u * u * u;
+}
+
 void
 animkick(Monitor *m)
 {
@@ -622,6 +768,8 @@ animstop(Monitor *m)
 		c->anim.fadein = 0;
 		c->anim.workspace = 0;
 		c->anim.hide = 0;
+		c->anim.zoom = 0;
+		clientunscale(c);
 		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 		if (c->surfbuf)
 			wlr_scene_buffer_set_opacity(c->surfbuf, clientopacity(c));
@@ -668,6 +816,42 @@ clientopacity(Client *c)
 	if (!opacityenabled || c->isfullscreen || c->isfakefull)
 		return 1.0f;
 	return win_opacity;
+}
+
+void
+clientborders(Client *c, int width, int height, int bw, int radius)
+{
+	/* the four edges are square and the corners carry the radius, so a
+	 * transparent client keeps a real rounded outline */
+	int horizontal, vertical;
+
+	if (!c->border.top)
+		return;
+	horizontal = MAX(0, width - 2 * radius);
+	vertical = MAX(0, height - 2 * radius);
+
+	wlr_scene_rect_set_size(c->border.top, horizontal, bw);
+	wlr_scene_node_set_position(&c->border.top->node, radius, 0);
+	wlr_scene_rect_set_size(c->border.bottom, horizontal, bw);
+	wlr_scene_node_set_position(&c->border.bottom->node, radius,
+			MAX(0, height - bw));
+	wlr_scene_rect_set_size(c->border.left, bw, vertical);
+	wlr_scene_node_set_position(&c->border.left->node, 0, radius);
+	wlr_scene_rect_set_size(c->border.right, bw, vertical);
+	wlr_scene_node_set_position(&c->border.right->node,
+			MAX(0, width - bw), radius);
+
+	wlr_scene_rect_set_size(c->border.top_left, radius, radius);
+	wlr_scene_node_set_position(&c->border.top_left->node, 0, 0);
+	wlr_scene_rect_set_size(c->border.top_right, radius, radius);
+	wlr_scene_node_set_position(&c->border.top_right->node,
+			MAX(0, width - radius), 0);
+	wlr_scene_rect_set_size(c->border.bottom_right, radius, radius);
+	wlr_scene_node_set_position(&c->border.bottom_right->node,
+			MAX(0, width - radius), MAX(0, height - radius));
+	wlr_scene_rect_set_size(c->border.bottom_left, radius, radius);
+	wlr_scene_node_set_position(&c->border.bottom_left->node, 0,
+			MAX(0, height - radius));
 }
 
 void
@@ -785,7 +969,8 @@ closeanimstart(struct wlr_scene_node *node, struct wlr_scene_tree *parent,
 {
 	CloseAnim *a;
 
-	if (!animations || animation_duration <= 0 || overview_visible
+	if (!animations || animation_type_close == AnimNone
+			|| animation_duration_close <= 0 || overview_visible
 			|| !node || !parent || !overviewvalid(m))
 		return 0;
 	a = ecalloc(1, sizeof(*a));
@@ -831,9 +1016,13 @@ closeanimadvance(Monitor *m, float dt)
 	CloseAnim *a, *tmp;
 	CloseBuffer *b;
 	float e, scale;
-	int cx, cy, duration, pending = 0;
+	int cx, cy, duration, slide, pending = 0;
 
-	duration = MAX(140, animation_duration * 5 / 8);
+	duration = MAX(60, animation_duration_close);
+	/* zoom collapses the window towards its own centre, slide drops it out
+	 * of the way; both fade, and a plain fade holds the window still */
+	slide = animation_type_close == AnimSlide
+			? MAX(16, MIN(64, (m->w.height ? m->w.height : 720) / 24)) : 0;
 	wl_list_for_each_safe(a, tmp, &close_anims, link) {
 		if (a->mon != m)
 			continue;
@@ -843,12 +1032,13 @@ closeanimadvance(Monitor *m, float dt)
 			continue;
 		}
 		pending = 1;
-		e = a->t * a->t * (3.0f - 2.0f * a->t);
-		scale = 1.0f - 0.045f * e;
+		e = animease(animation_curve_close, a->t);
+		scale = animation_type_close == AnimZoom
+				? 1.0f - (1.0f - zoom_end_ratio) * e : 1.0f;
 		cx = (a->minx + a->maxx) / 2;
 		cy = (a->miny + a->maxy) / 2;
 		wlr_scene_node_set_position(&a->tree->node, a->x,
-				a->y + (int)roundf(18.0f * e));
+				a->y + (int)roundf(slide * e));
 		wl_list_for_each(b, &a->buffers, link) {
 			wlr_scene_node_set_position(&b->scene->node,
 					cx + (int)roundf((b->x - cx) * scale),
@@ -897,7 +1087,8 @@ layeropacity(LayerSurface *l, float opacity)
 static void
 layeranimstart(LayerSurface *l)
 {
-	if (!animations || animation_duration <= 0 || overview_visible
+	if (!animations || animation_type_open == AnimNone
+			|| animation_duration_open <= 0 || overview_visible
 			|| !layeranimated(l))
 		return;
 	l->anim.active = 1;
@@ -919,7 +1110,7 @@ layeranimadvance(Monitor *m, float dt)
 	float e, opacity;
 	int i, duration, pending = 0;
 
-	duration = MAX(160, animation_duration * 3 / 4);
+	duration = MAX(60, animation_duration_open);
 	for (i = 0; i < 4; i++) {
 		wl_list_for_each(l, &m->layers[i], link) {
 			if (!l->anim.active)
@@ -935,8 +1126,8 @@ layeranimadvance(Monitor *m, float dt)
 				continue;
 			}
 			pending = 1;
-			e = 1.0f - powf(1.0f - l->anim.t, 3.0f);
-			opacity = l->anim.t * (2.0f - l->anim.t);
+			e = animease(animation_curve_open, l->anim.t);
+			opacity = e;
 			wlr_scene_node_set_position(&l->scene->node, l->scene->node.x,
 					l->anim.from_y
 					+ (int)roundf((l->anim.to_y - l->anim.from_y) * e));
@@ -1003,7 +1194,9 @@ arrange(Monitor *m)
 	if (!m->wlr_output->enabled)
 		return;
 
-	/* a fullscreen client (real or fake) is shown alone on its workspace */
+	/* a fullscreen client (real or fake) is shown alone on its workspace;
+	 * in the scroll layout fake fullscreen leaves the strip mapped beneath
+	 * so it just grows over it and shrinks back, like niri */
 	wl_list_for_each(c, &clients, link) {
 		if (!fs && VISIBLEON(c, m) && (c->isfullscreen || c->isfakefull))
 			fs = c;
@@ -1011,7 +1204,8 @@ arrange(Monitor *m)
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon == m) {
-			int vis = VISIBLEON(c, m) && (!fs || c == fs);
+			int vis = VISIBLEON(c, m) && (!fs || c == fs
+					|| (SCROLLLT(m) && fs->isfakefull));
 			int render = vis || (c->anim.workspace && c->anim.hide);
 			wlr_scene_node_set_enabled(&c->scene->node, render);
 			client_set_suspended(c, !vis);
@@ -1020,9 +1214,16 @@ arrange(Monitor *m)
 
 	wlr_scene_node_set_enabled(&m->fullscreen_bg->node, fs && fs->isfullscreen);
 
-	if (fs) {
+	if (fs && fs->isfakefull && SCROLLLT(m) && !fs->isfloating) {
+		scroll_tile(m);
+		resize(fs, m->m, 0); /* cover the whole output */
+	} else if (fs) {
 		if (fs->isfakefull)
 			resize(fs, m->w, 0);
+	} else if (SCROLLLT(m)) {
+		scroll_tile(m);
+	} else if (DRIFTLT(m)) {
+		drifttile(m);
 	} else {
 		bsp_tile(m->tree[m->ws], m->w);
 	}
@@ -1097,12 +1298,46 @@ void
 axisnotify(struct wl_listener *listener, void *data)
 {
 	struct wlr_pointer_axis_event *event = data;
+	Monitor *m;
 	double delta;
 	int dir;
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 	delta = event->delta != 0.0 ? event->delta : event->delta_discrete;
 	dir = delta > 0.0 ? 1 : delta < 0.0 ? -1 : 0;
+	if (!locked && !overview_visible && dir
+			&& DRIFTLT((m = xytomon(cursor->x, cursor->y)))) {
+		struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
+		struct wlr_surface *surface = NULL;
+		double amount = event->relative_direction
+				== WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED ? -delta : delta;
+		double z = driftz(m, m->ws);
+		int super = super_group && super_group->super_down;
+
+		if (super && kb && (wlr_keyboard_get_modifiers(kb) & WLR_MODIFIER_SHIFT)) {
+			/* Mod+Shift+wheel zooms at the pointer; plain Mod+wheel keeps
+			 * changing workspace, like in the other layouts */
+			super_group->super_alone = 0;
+			driftzoomto(m, z * (dir > 0 ? 1.0 / drift_zoom_step : drift_zoom_step),
+					cursor->x, cursor->y);
+			return;
+		}
+		if (!super) {
+			xytonode(cursor->x, cursor->y, &surface, NULL, NULL, NULL, NULL);
+			if (!surface) {
+				/* over bare canvas, scrolling pans it; over a window the
+				 * event belongs to the client */
+				if (event->source != WL_POINTER_AXIS_SOURCE_FINGER)
+					amount *= 4.0;
+				if (event->orientation == WL_POINTER_AXIS_HORIZONTAL_SCROLL)
+					m->camx[m->ws] += amount * drift_pan_speed / z;
+				else
+					m->camy[m->ws] += amount * drift_pan_speed / z;
+				driftarrange(m);
+				return;
+			}
+		}
+	}
 	if (super_group && super_group->super_down
 			&& (event->source == WL_POINTER_AXIS_SOURCE_WHEEL
 				|| event->source == WL_POINTER_AXIS_SOURCE_WHEEL_TILT)) {
@@ -1120,33 +1355,8 @@ axisnotify(struct wl_listener *listener, void *data)
 				workspacestep(dir);
 			return;
 		}
-		if (event->source != WL_POINTER_AXIS_SOURCE_FINGER)
-			return;
-		if (event->delta == 0.0) {
-			if (event->orientation == WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
-				overview_axis_dx = overview_axis_dy = 0.0;
-				overview_axis_triggered = 0;
-			}
-			return;
-		}
-		if ((uint32_t)(event->time_msec - overview_axis_time) > 180) {
-			overview_axis_dx = overview_axis_dy = 0.0;
-			overview_axis_triggered = 0;
-		}
-		overview_axis_time = event->time_msec;
-		delta = event->relative_direction
-				== WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED
-				? -event->delta : event->delta;
-		if (event->orientation == WL_POINTER_AXIS_HORIZONTAL_SCROLL)
-			overview_axis_dx += delta;
-		else
-			overview_axis_dy += delta;
-		if (!overview_axis_triggered
-				&& fabs(overview_axis_dx) >= 48.0
-				&& fabs(overview_axis_dx) > fabs(overview_axis_dy) * 1.2) {
-			overview_axis_triggered = 1;
-			workspacestep(overview_axis_dx < 0.0 ? 1 : -1);
-		}
+		/* two-finger scrolling stays out of workspace switching; the
+		 * overview is walked with three fingers, the wheel or the keys */
 		return;
 	}
 	wlr_seat_pointer_notify_axis(seat,
@@ -1155,14 +1365,26 @@ axisnotify(struct wl_listener *listener, void *data)
 }
 
 void
-swipebeginnotify(struct wl_listener *listener, void *data)
+swipefocus(int dir)
 {
-	struct wlr_pointer_swipe_begin_event *event = data;
+	/* directional focus from a touchpad gesture: no cursor warp */
+	Arg a = {.i = dir};
+	int oldwarp = warpcursor;
+
+	warpcursor = 0;
+	focusdir(&a);
+	warpcursor = oldwarp;
+}
+
+void
+gesturebegin(uint32_t fingers)
+{
 	Monitor *m;
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
-	overview_swipe_active = !locked && (event->fingers == 3
-			|| (overview_active && event->fingers == 2));
+	/* three and four fingers only: two-finger scrolling belongs to the
+	 * clients, and in the drift layout to the canvas */
+	overview_swipe_active = !locked && (fingers == 3 || fingers == 4);
 	overview_swipe_triggered = 0;
 	overview_swipe_dx = overview_swipe_dy = 0.0;
 	if (!overview_swipe_active)
@@ -1173,26 +1395,106 @@ swipebeginnotify(struct wl_listener *listener, void *data)
 }
 
 void
-swipeupdatenotify(struct wl_listener *listener, void *data)
+swipebeginnotify(struct wl_listener *listener, void *data)
 {
-	struct wlr_pointer_swipe_update_event *event = data;
+	struct wlr_pointer_swipe_begin_event *event = data;
 
-	if (!overview_swipe_active || (event->fingers != 2 && event->fingers != 3)
+	gesturebegin(event->fingers);
+}
+
+void
+gestureupdate(uint32_t fingers, double dx, double dy)
+{
+	if (!overview_swipe_active || fingers < 3 || fingers > 4
 			|| !overviewvalid(selmon))
 		return;
-	overview_swipe_dx += event->dx;
-	overview_swipe_dy += event->dy;
+	overview_swipe_dx += dx;
+	overview_swipe_dy += dy;
+
+	if (fingers == 4) {
+		/* four fingers walk the workspaces and open the overview in every
+		 * layout, which is where drift keeps them since three fingers pan */
+		const double step = 120.0;
+
+		if (fabs(overview_swipe_dx) > fabs(overview_swipe_dy) * 1.2) {
+			for (; overview_swipe_dx <= -step; overview_swipe_dx += step) {
+				overview_swipe_dy = 0.0;
+				workspacestep(1);
+			}
+			for (; overview_swipe_dx >= step; overview_swipe_dx -= step) {
+				overview_swipe_dy = 0.0;
+				workspacestep(-1);
+			}
+		} else if (!overview_swipe_triggered && fabs(overview_swipe_dy) >= 64.0) {
+			overview_swipe_triggered = 1;
+			overviewset(overview_swipe_dy < 0.0);
+		}
+		return;
+	}
+
+	if (fingers == 3 && DRIFTLT(selmon) && !overview_visible) {
+		/* three fingers pan the canvas, the content following the fingers */
+		double z = driftz(selmon, selmon->ws);
+
+		selmon->camx[selmon->ws] -= dx * drift_pan_speed / z;
+		selmon->camy[selmon->ws] -= dy * drift_pan_speed / z;
+		driftarrange(selmon);
+		return;
+	}
+
+	if (SCROLLLT(selmon)) {
+		/* niri-style gestures: horizontal swipes walk the windows on the
+		 * strip, vertical swipes change workspace; every swipe_step
+		 * pixels repeats the action so a long swipe keeps going */
+		const double step = 140.0;
+
+		if (fabs(overview_swipe_dx) > fabs(overview_swipe_dy) * 1.2) {
+			for (; overview_swipe_dx <= -step; overview_swipe_dx += step) {
+				overview_swipe_dy = 0.0;
+				if (overview_active)
+					overviewfocuscol(1);
+				else if (!overview_visible)
+					swipefocus(DirRight);
+			}
+			for (; overview_swipe_dx >= step; overview_swipe_dx -= step) {
+				overview_swipe_dy = 0.0;
+				if (overview_active)
+					overviewfocuscol(-1);
+				else if (!overview_visible)
+					swipefocus(DirLeft);
+			}
+		} else if (fabs(overview_swipe_dy) > fabs(overview_swipe_dx) * 1.2) {
+			for (; overview_swipe_dy <= -step; overview_swipe_dy += step) {
+				overview_swipe_dx = 0.0;
+				workspacestep(1);
+			}
+			for (; overview_swipe_dy >= step; overview_swipe_dy -= step) {
+				overview_swipe_dx = 0.0;
+				workspacestep(-1);
+			}
+		}
+		return;
+	}
+
 	if (overview_swipe_triggered)
 		return;
 	if (fabs(overview_swipe_dx) >= 48.0
 			&& fabs(overview_swipe_dx) > fabs(overview_swipe_dy) * 1.2) {
 		overview_swipe_triggered = 1;
 		workspacestep(overview_swipe_dx < 0.0 ? 1 : -1);
-	} else if (event->fingers == 3 && fabs(overview_swipe_dy) >= 48.0
+	} else if (fingers == 3 && fabs(overview_swipe_dy) >= 48.0
 			&& fabs(overview_swipe_dy) > fabs(overview_swipe_dx) * 1.2) {
 		overview_swipe_triggered = 1;
 		overviewset(overview_swipe_dy < 0.0);
 	}
+}
+
+void
+swipeupdatenotify(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_swipe_update_event *event = data;
+
+	gestureupdate(event->fingers, event->dx, event->dy);
 }
 
 void
@@ -1204,11 +1506,69 @@ swipeendnotify(struct wl_listener *listener, void *data)
 }
 
 void
+pinchbeginnotify(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_pinch_begin_event *event = data;
+	Monitor *m;
+
+	drift_pinch_done = 0;
+	drift_pinch_x = cursor->x;
+	drift_pinch_y = cursor->y;
+	gesturebegin(event->fingers);
+	m = xytomon(cursor->x, cursor->y);
+	if (!locked && overviewvalid(m))
+		selmon = m;
+	drift_pinch_zoom = DRIFTLT(selmon) ? driftz(selmon, selmon->ws) : 1.0;
+}
+
+void
+pinchupdatenotify(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_pinch_update_event *event = data;
+
+	if (locked || !overviewvalid(selmon) || event->scale <= 0.0)
+		return;
+	if (event->fingers >= 3) {
+		/* libinput reports a three-finger swipe as a pinch as soon as the
+		 * fingers drift apart a little, so the movement is fed to the swipe
+		 * handler instead of the zoom — otherwise the gesture would either
+		 * do nothing or zoom by accident */
+		if (event->fingers >= 4 && !drift_pinch_done) {
+			if (event->scale <= 0.75) {
+				drift_pinch_done = 1;
+				overviewset(1);
+			} else if (event->scale >= 1.3) {
+				drift_pinch_done = 1;
+				overviewset(0);
+			}
+		}
+		gestureupdate(event->fingers, event->dx, event->dy);
+		return;
+	}
+	if (overview_visible || !DRIFTLT(selmon))
+		return;
+	/* a two-finger pinch zooms the camera around the pinch centre */
+	driftzoomto(selmon, drift_pinch_zoom * event->scale,
+			drift_pinch_x, drift_pinch_y);
+}
+
+void
+pinchendnotify(struct wl_listener *listener, void *data)
+{
+	drift_pinch_done = 0;
+	overview_swipe_active = 0;
+	overview_swipe_triggered = 0;
+	overview_swipe_dx = overview_swipe_dy = 0.0;
+}
+
+void
 bsp_attach(Monitor *m, unsigned int ws, Client *c)
 {
 	Node *leaf, *t = NULL, *sp;
 	Client *f;
 
+	c->canvas.width = c->canvas.height = 0;
+	c->canvassized = 0; /* the window is no longer sized by a canvas */
 	leaf = ecalloc(1, sizeof(Node));
 	leaf->leaf = 1;
 	leaf->ratio = 0.5f;
@@ -1378,6 +1738,1175 @@ bsp_tile(Node *n, struct wlr_box box)
 	}
 }
 
+Column *
+scroll_addcol(Monitor *m, unsigned int ws, struct wl_list *pos)
+{
+	Column *col = ecalloc(1, sizeof(Column));
+
+	wl_list_init(&col->clients);
+	col->wfrac = scroll_colfrac;
+	wl_list_insert(pos, &col->link);
+	return col;
+}
+
+void
+scroll_addclient(Column *col, Client *c, unsigned int ws)
+{
+	wl_list_insert(col->clients.prev, &c->clink);
+	c->col = col;
+	c->ws = ws;
+}
+
+void
+scroll_attach(Monitor *m, unsigned int ws, Client *c)
+{
+	/* a new window opens in its own column right of the focused one, like niri */
+	Column *after = NULL;
+	Client *f;
+
+	c->canvas.width = c->canvas.height = 0;
+	c->canvassized = 0; /* the window is no longer sized by a canvas */
+
+	if (lt_migrating) {
+		/* rebuilding the strip from another layout: keep tiling order */
+		scroll_addclient(scroll_addcol(m, ws, m->cols[ws].prev), c, ws);
+		return;
+	}
+	wl_list_for_each(f, &fstack, flink) {
+		if (f != c && f->mon == m && f->ws == ws && f->col) {
+			after = f->col;
+			break;
+		}
+	}
+	scroll_addclient(scroll_addcol(m, ws,
+			after ? &after->link : m->cols[ws].prev), c, ws);
+}
+
+void
+scroll_detach(Client *c)
+{
+	Column *col = c->col;
+
+	if (!col)
+		return;
+	wl_list_remove(&c->clink);
+	c->col = NULL;
+	if (wl_list_empty(&col->clients)) {
+		wl_list_remove(&col->link);
+		free(col);
+	}
+}
+
+int
+scroll_coltiled(Column *col)
+{
+	Client *c;
+	int n = 0;
+
+	wl_list_for_each(c, &col->clients, clink) {
+		if (!c->isfloating)
+			n++;
+	}
+	return n;
+}
+
+int
+scroll_colwidth(Monitor *m, Column *col)
+{
+	int w = (int)(m->w.width * col->wfrac);
+
+	return MAX(2 * gappx + 50, MIN(w, m->w.width));
+}
+
+Client *
+wsfocused(Monitor *m, unsigned int ws)
+{
+	Client *c;
+
+	wl_list_for_each(c, &fstack, flink) {
+		if (c->mon == m && c->ws == ws && c->col && !c->isfloating)
+			return c;
+	}
+	return NULL;
+}
+
+Client *
+wsfocusedany(Monitor *m, unsigned int ws)
+{
+	Client *c;
+
+	wl_list_for_each(c, &fstack, flink) {
+		if (c->mon == m && c->ws == ws)
+			return c;
+	}
+	return NULL;
+}
+
+void
+scroll_tile(Monitor *m)
+{
+	Column *col, *fcol;
+	Client *c, *focus = wsfocused(m, m->ws);
+	int gap = gappx;
+	int total = 0, x, colw, n, i, h;
+	int *sx = &m->scrollx[m->ws];
+
+	fcol = focus ? focus->col : NULL;
+
+	/* total strip width, then scroll just enough to reveal the focused
+	 * column — the columns themselves never move, only the viewport */
+	wl_list_for_each(col, &m->cols[m->ws], link) {
+		if (scroll_coltiled(col))
+			total += scroll_colwidth(m, col);
+	}
+	if (total <= m->w.width) {
+		*sx = 0;
+	} else {
+		x = 0;
+		wl_list_for_each(col, &m->cols[m->ws], link) {
+			if (!scroll_coltiled(col))
+				continue;
+			colw = scroll_colwidth(m, col);
+			if (col == fcol) {
+				if (x < *sx)
+					*sx = x;
+				else if (x + colw > *sx + m->w.width)
+					*sx = x + colw - m->w.width;
+				break;
+			}
+			x += colw;
+		}
+		*sx = MAX(0, MIN(*sx, total - m->w.width));
+	}
+
+	x = 0;
+	wl_list_for_each(col, &m->cols[m->ws], link) {
+		if (!(n = scroll_coltiled(col)))
+			continue;
+		colw = scroll_colwidth(m, col);
+		h = m->w.height / n;
+		i = 0;
+		wl_list_for_each(c, &col->clients, clink) {
+			if (c->isfloating)
+				continue;
+			resize(c, (struct wlr_box){
+				.x = m->w.x + x - *sx + gap,
+				.y = m->w.y + i * h + gap,
+				.width = MAX(1, colw - 2 * gap),
+				.height = MAX(1, (i == n - 1 ? m->w.height - i * h : h)
+					- 2 * gap)}, 0);
+			wlr_log(WLR_DEBUG, "scroll: ws=%u %dx%d%+d%+d sx=%d", c->ws,
+					c->geom.width, c->geom.height,
+					c->geom.x, c->geom.y, *sx);
+			i++;
+		}
+		x += colw;
+	}
+}
+
+Client *
+scroll_next(Monitor *m, Client *sel)
+{
+	/* next client in strip order, wrapping like bsp_nextleaf */
+	Column *col = sel->col;
+	struct wl_list *cl = sel->clink.next;
+	Client *c;
+
+	for (;;) {
+		if (cl != &col->clients) {
+			c = wl_container_of(cl, c, clink);
+			return c;
+		}
+		/* end of the column: hop to the next one (empty columns are freed
+		 * on detach, so any wrapped-to column has at least one client) */
+		col = col->link.next == &m->cols[sel->ws]
+				? wl_container_of(m->cols[sel->ws].next, col, link)
+				: wl_container_of(col->link.next, col, link);
+		cl = col->clients.next;
+	}
+}
+
+void
+scroll_dragto(Client *c, double cx)
+{
+	/* niri-style drag: reorder the strip live under the cursor instead of
+	 * floating the window */
+	Monitor *m = c->mon;
+	Column *col, *own, *target = NULL;
+	int x = 0, colw = 0, tx = 0;
+	double lx;
+
+	if (!m || !c->col || c->isfloating)
+		return;
+	lx = cx - m->w.x + m->scrollx[c->ws];
+	wl_list_for_each(col, &m->cols[c->ws], link) {
+		if (!scroll_coltiled(col))
+			continue;
+		colw = scroll_colwidth(m, col);
+		if (lx < x + colw) {
+			target = col;
+			tx = x;
+			break;
+		}
+		x += colw;
+	}
+	if (target == c->col)
+		return;
+	/* pull the window out of a shared column first */
+	if (wl_list_length(&c->col->clients) > 1) {
+		own = scroll_addcol(m, c->ws, &c->col->link);
+		wl_list_remove(&c->clink);
+		wl_list_insert(own->clients.prev, &c->clink);
+		c->col = own;
+	}
+	if (!target) {
+		if (c->col->link.next == &m->cols[c->ws])
+			return;
+		wl_list_remove(&c->col->link);
+		wl_list_insert(m->cols[c->ws].prev, &c->col->link);
+	} else if (lx < tx + colw / 2) {
+		if (c->col->link.next == &target->link)
+			return;
+		wl_list_remove(&c->col->link);
+		wl_list_insert(target->link.prev, &c->col->link);
+	} else {
+		if (c->col->link.prev == &target->link)
+			return;
+		wl_list_remove(&c->col->link);
+		wl_list_insert(&target->link, &c->col->link);
+	}
+	arrange(m);
+}
+
+void
+scroll_maximize(Client *sel)
+{
+	/* niri maximize-column: make the column screen-wide, and back to the
+	 * width it had before */
+	Column *col = sel->col;
+
+	if (col->wfrac < 0.995f) {
+		col->prevfrac = col->wfrac;
+		col->wfrac = 1.0f;
+	} else {
+		col->wfrac = col->prevfrac > 0.0f ? col->prevfrac : scroll_colfrac;
+	}
+	arrange(sel->mon);
+}
+
+void
+scroll_swap(Client *sel, int dir)
+{
+	Column *col = sel->col;
+	struct wl_list *pos;
+
+	if (dir == DirLeft || dir == DirRight) {
+		/* move the whole column across, like niri */
+		pos = dir == DirLeft ? col->link.prev : col->link.next;
+		if (pos == &sel->mon->cols[sel->ws])
+			return;
+		wl_list_remove(&col->link);
+		wl_list_insert(dir == DirLeft ? pos->prev : pos, &col->link);
+	} else {
+		pos = dir == DirUp ? sel->clink.prev : sel->clink.next;
+		if (pos == &col->clients)
+			return;
+		wl_list_remove(&sel->clink);
+		wl_list_insert(dir == DirUp ? pos->prev : pos, &sel->clink);
+	}
+	arrange(sel->mon);
+	warpto(sel);
+}
+
+/* ---- drift: a driftwm-style infinite canvas, one per workspace ----
+ * Windows keep the size they asked for and sit at fixed canvas coordinates.
+ * Every workspace owns a camera (pan + zoom) over its canvas; zooming scales
+ * the rendered surfaces, so clients never learn about it and keep their
+ * native size. */
+
+double
+driftz(Monitor *m, unsigned int ws)
+{
+	double z = m->camz[ws] > 0.0 ? m->camz[ws] : 1.0;
+
+	return MIN((double)drift_zoom_max, MAX((double)drift_zoom_min, z));
+}
+
+int
+drifttiled(Client *c, Monitor *m, unsigned int ws)
+{
+	return c->mon == m && c->ws == ws && c->oncanvas && !c->isfloating;
+}
+
+void
+driftscreen(Monitor *m, Client *c, struct wlr_box *out)
+{
+	/* canvas rect -> screen rect; borders keep their pixel width at any zoom */
+	double z = driftz(m, c->ws);
+	int bw = 2 * (int)c->bw;
+
+	out->x = m->w.x + (int)round((c->canvas.x - m->camx[c->ws]) * z);
+	out->y = m->w.y + (int)round((c->canvas.y - m->camy[c->ws]) * z);
+	out->width = MAX(1 + bw, (int)round((c->canvas.width - bw) * z) + bw);
+	out->height = MAX(1 + bw, (int)round((c->canvas.height - bw) * z) + bw);
+}
+
+static int
+driftoverlap(const struct wlr_box *a, const struct wlr_box *b, int margin)
+{
+	return a->x - margin < b->x + b->width && b->x - margin < a->x + a->width
+			&& a->y - margin < b->y + b->height && b->y - margin < a->y + a->height;
+}
+
+void
+driftattach(Monitor *m, unsigned int ws, Client *c)
+{
+	struct wlr_box box, t;
+	Client *o;
+	double z = driftz(m, ws);
+	int bw = 2 * (int)c->bw, ring, dx, dy, stepx, stepy, taken;
+
+	c->ws = ws;
+	c->oncanvas = 1;
+	if (lt_migrating && c->geom.width > 0 && c->geom.height > 0) {
+		/* coming from another layout: stay exactly where the window is now */
+		c->canvas.width = MAX(1 + bw, (int)round((c->geom.width - bw) / z) + bw);
+		c->canvas.height = MAX(1 + bw, (int)round((c->geom.height - bw) / z) + bw);
+		c->canvas.x = (int)round((c->geom.x - m->w.x) / z + m->camx[ws]);
+		c->canvas.y = (int)round((c->geom.y - m->w.y) / z + m->camy[ws]);
+		c->canvassized = client_surface(c)->mapped;
+		return;
+	}
+
+	if (!c->canvassized || c->canvas.width <= 0 || c->canvas.height <= 0) {
+		/* arriving from another layout or freshly mapped: there the
+		 * geometry is the real size.  A window that already lives on a
+		 * canvas keeps its own size instead — c->geom would be the
+		 * zoomed screen box, which would shrink it on every move. */
+		c->canvas.width = MAX(1 + bw, c->geom.width);
+		c->canvas.height = MAX(1 + bw, c->geom.height);
+	}
+	c->canvassized = client_surface(c)->mapped;
+	/* start centred in the viewport, then spiral outwards over a grid of
+	 * the window's own size until the spot is free */
+	stepx = c->canvas.width + MAX(1, gappx);
+	stepy = c->canvas.height + MAX(1, gappx);
+	box = c->canvas;
+	box.x = (int)round(m->camx[ws] + (m->w.width / z - box.width) / 2.0);
+	box.y = (int)round(m->camy[ws] + (m->w.height / z - box.height) / 2.0);
+	for (ring = 0; ring < 8; ring++) {
+		int bestscore = 0, found = 0;
+		struct wlr_box best = box;
+
+		for (dy = -ring; dy <= ring; dy++) {
+			for (dx = -ring; dx <= ring; dx++) {
+				int score;
+				if (ring && MAX(dx < 0 ? -dx : dx, dy < 0 ? -dy : dy) != ring)
+					continue;
+				/* nearest to the camera wins, and right or below beats
+				 * left or above, so windows grow away from the corner */
+				score = 4 * ((dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy))
+						+ (dx < 0) + (dy < 0);
+				if (found && score >= bestscore)
+					continue;
+				t = box;
+				t.x += dx * stepx;
+				t.y += dy * stepy;
+				taken = 0;
+				wl_list_for_each(o, &clients, link) {
+					if (o != c && drifttiled(o, m, ws)
+							&& driftoverlap(&t, &o->canvas, gappx)) {
+						taken = 1;
+						break;
+					}
+				}
+				if (!taken) {
+					best = t;
+					bestscore = score;
+					found = 1;
+				}
+			}
+		}
+		if (found) {
+			c->canvas.x = best.x;
+			c->canvas.y = best.y;
+			driftreveal(m, c); /* a new window is always brought into view */
+			return;
+		}
+	}
+	/* the canvas around the camera is packed solid: cascade instead */
+	c->canvas.x = box.x + (wl_list_length(&clients) % 8) * MAX(24, gappx * 3);
+	c->canvas.y = box.y + (wl_list_length(&clients) % 8) * MAX(24, gappx * 3);
+	driftreveal(m, c);
+}
+
+void
+driftdetach(Client *c)
+{
+	c->oncanvas = 0;
+}
+
+void
+drifttile(Monitor *m)
+{
+	struct wlr_box box;
+	Client *c;
+
+	wl_list_for_each(c, &clients, link) {
+		if (!drifttiled(c, m, m->ws))
+			continue;
+		driftscreen(m, c, &box);
+		resize(c, box, 0);
+		wlr_log(WLR_DEBUG, "drift: ws=%u %dx%d%+d%+d cam=%.0f,%.0f z=%.2f",
+				c->ws, c->canvas.width, c->canvas.height,
+				c->canvas.x, c->canvas.y, m->camx[c->ws], m->camy[c->ws],
+				driftz(m, c->ws));
+	}
+}
+
+void
+driftbounds(Monitor *m, unsigned int ws, int withview, struct wlr_box *out)
+{
+	/* the canvas area in use, optionally joined with the current viewport */
+	double z = driftz(m, ws);
+	Client *c;
+	int x1 = 0, y1 = 0, x2 = 0, y2 = 0, first = 1;
+
+	if (withview) {
+		x1 = (int)round(m->camx[ws]);
+		y1 = (int)round(m->camy[ws]);
+		x2 = x1 + MAX(1, (int)round(m->w.width / z));
+		y2 = y1 + MAX(1, (int)round(m->w.height / z));
+		first = 0;
+	}
+	wl_list_for_each(c, &clients, link) {
+		if (!drifttiled(c, m, ws))
+			continue;
+		if (first) {
+			x1 = c->canvas.x;
+			y1 = c->canvas.y;
+			x2 = c->canvas.x + c->canvas.width;
+			y2 = c->canvas.y + c->canvas.height;
+			first = 0;
+			continue;
+		}
+		x1 = MIN(x1, c->canvas.x);
+		y1 = MIN(y1, c->canvas.y);
+		x2 = MAX(x2, c->canvas.x + c->canvas.width);
+		y2 = MAX(y2, c->canvas.y + c->canvas.height);
+	}
+	if (first) {
+		x1 = (int)round(m->camx[ws]);
+		y1 = (int)round(m->camy[ws]);
+		x2 = x1 + MAX(1, (int)round(m->w.width / z));
+		y2 = y1 + MAX(1, (int)round(m->w.height / z));
+	}
+	*out = (struct wlr_box){.x = x1, .y = y1,
+		.width = MAX(1, x2 - x1), .height = MAX(1, y2 - y1)};
+}
+
+static void
+driftsnapedge(int lo, int size, int tlo, int tsize, int *best, int *out)
+{
+	/* the four ways our edges can meet theirs: aligned or butted together */
+	int cand[4], i, d;
+
+	cand[0] = tlo;
+	cand[1] = tlo + tsize;
+	cand[2] = tlo - size;
+	cand[3] = tlo + tsize - size;
+	for (i = 0; i < 4; i++) {
+		d = cand[i] > lo ? cand[i] - lo : lo - cand[i];
+		if (d <= drift_snap && d < *best) {
+			*best = d;
+			*out = cand[i];
+		}
+	}
+}
+
+void
+driftsnap(Monitor *m, Client *c, struct wlr_box *box)
+{
+	/* snapping kicks in as edges approach each other, like driftwm */
+	double z = driftz(m, c->ws);
+	struct wlr_box view;
+	Client *o;
+	int x = box->x, y = box->y;
+	int bestx = drift_snap + 1, besty = drift_snap + 1;
+
+	if (drift_snap <= 0)
+		return;
+	view.x = (int)round(m->camx[c->ws]);
+	view.y = (int)round(m->camy[c->ws]);
+	view.width = MAX(1, (int)round(m->w.width / z));
+	view.height = MAX(1, (int)round(m->w.height / z));
+	driftsnapedge(box->x, box->width, view.x, view.width, &bestx, &x);
+	driftsnapedge(box->y, box->height, view.y, view.height, &besty, &y);
+	wl_list_for_each(o, &clients, link) {
+		if (o == c || !drifttiled(o, m, c->ws))
+			continue;
+		/* only snap along an axis where the windows actually face each other */
+		if (o->canvas.y - drift_snap < box->y + box->height
+				&& box->y - drift_snap < o->canvas.y + o->canvas.height)
+			driftsnapedge(box->x, box->width, o->canvas.x, o->canvas.width,
+					&bestx, &x);
+		if (o->canvas.x - drift_snap < box->x + box->width
+				&& box->x - drift_snap < o->canvas.x + o->canvas.width)
+			driftsnapedge(box->y, box->height, o->canvas.y, o->canvas.height,
+					&besty, &y);
+	}
+	box->x = x;
+	box->y = y;
+}
+
+int
+driftcluster(Client *c, Client **out, int max)
+{
+	/* windows that touch, directly or through another window, form an
+	 * implicit group that moves together */
+	Client *o;
+	int n = 1, i, added = 1;
+
+	out[0] = c;
+	while (added && n < max) {
+		added = 0;
+		wl_list_for_each(o, &clients, link) {
+			if (o == c || !drifttiled(o, c->mon, c->ws))
+				continue;
+			for (i = 0; i < n; i++)
+				if (out[i] == o)
+					break;
+			if (i < n)
+				continue;
+			for (i = 0; i < n; i++)
+				if (driftoverlap(&o->canvas, &out[i]->canvas, MAX(1, drift_snap)))
+					break;
+			if (i == n)
+				continue;
+			out[n++] = o;
+			added = 1;
+			if (n == max)
+				break;
+		}
+	}
+	return n;
+}
+
+void
+driftmove(Client *c, int dx, int dy, int cluster)
+{
+	Client *group[32];
+	int i, n = 1;
+
+	if (!dx && !dy)
+		return;
+	group[0] = c;
+	if (cluster)
+		n = driftcluster(c, group, (int)LENGTH(group));
+	for (i = 0; i < n; i++) {
+		group[i]->canvas.x += dx;
+		group[i]->canvas.y += dy;
+	}
+}
+
+void
+driftreveal(Monitor *m, Client *c)
+{
+	/* pan just enough to bring the window into the viewport */
+	double z, vw, vh, x, y;
+	int margin;
+
+	if (!DRIFTLT(m) || !c || !c->oncanvas || c->isfloating)
+		return;
+	z = driftz(m, c->ws);
+	vw = m->w.width / z;
+	vh = m->w.height / z;
+	x = m->camx[c->ws];
+	y = m->camy[c->ws];
+	margin = MAX(8, gappx);
+	if (c->canvas.x - margin < x)
+		x = c->canvas.x - margin;
+	else if (c->canvas.x + c->canvas.width + margin > x + vw)
+		x = c->canvas.x + c->canvas.width + margin - vw;
+	if (c->canvas.y - margin < y)
+		y = c->canvas.y - margin;
+	else if (c->canvas.y + c->canvas.height + margin > y + vh)
+		y = c->canvas.y + c->canvas.height + margin - vh;
+	m->camx[c->ws] = x;
+	m->camy[c->ws] = y;
+}
+
+Client *
+driftpick(Monitor *m, Client *from, int dir)
+{
+	/* nearest window in that direction on the canvas, offscreen ones
+	 * included; unlike tiled layouts nothing has to line up */
+	Client *c, *best = NULL;
+	long bestscore = 0;
+	int fx, fy;
+
+	if (!from)
+		return NULL;
+	fx = from->canvas.x + from->canvas.width / 2;
+	fy = from->canvas.y + from->canvas.height / 2;
+	wl_list_for_each(c, &clients, link) {
+		long primary, perp, score;
+		int dx, dy;
+		if (c == from || !drifttiled(c, m, m->ws))
+			continue;
+		dx = c->canvas.x + c->canvas.width / 2 - fx;
+		dy = c->canvas.y + c->canvas.height / 2 - fy;
+		if (dir == DirLeft || dir == DirRight) {
+			primary = dir == DirLeft ? -dx : dx;
+			perp = dy < 0 ? -dy : dy;
+		} else {
+			primary = dir == DirUp ? -dy : dy;
+			perp = dx < 0 ? -dx : dx;
+		}
+		if (primary <= 0 || perp > primary * 2)
+			continue;
+		score = primary + perp / 2;
+		if (!best || score < bestscore) {
+			best = c;
+			bestscore = score;
+		}
+	}
+	return best;
+}
+
+void
+driftzoomto(Monitor *m, double z, double ax, double ay)
+{
+	/* zoom around a screen anchor: the canvas point under it stays put */
+	unsigned int ws;
+	double old, cx, cy;
+
+	if (!DRIFTLT(m) || m->w.width <= 0 || m->w.height <= 0)
+		return;
+	ws = m->ws;
+	old = driftz(m, ws);
+	z = MIN((double)drift_zoom_max, MAX((double)drift_zoom_min, z));
+	if (fabs(z - old) < 0.0005)
+		return;
+	cx = m->camx[ws] + (ax - m->w.x) / old;
+	cy = m->camy[ws] + (ay - m->w.y) / old;
+	m->camz[ws] = z;
+	m->camx[ws] = cx - (ax - m->w.x) / z;
+	m->camy[ws] = cy - (ay - m->w.y) / z;
+	driftarrange(m);
+}
+
+void
+driftzoomkey(const Arg *arg)
+{
+	Monitor *m = selmon;
+
+	double ax, ay;
+
+	if (!DRIFTLT(m))
+		return;
+	/* zoom around the middle of the viewport: positive zooms in, negative
+	 * out, zero goes back to 1:1 */
+	ax = m->w.x + m->w.width / 2.0;
+	ay = m->w.y + m->w.height / 2.0;
+	if (arg->f == 0.0f)
+		driftzoomto(m, 1.0, ax, ay);
+	else
+		driftzoomto(m, driftz(m, m->ws) * (arg->f > 0.0f
+				? drift_zoom_step : 1.0f / drift_zoom_step), ax, ay);
+}
+
+void
+driftfit(const Arg *arg)
+{
+	/* zoom to fit every window on the workspace, like driftwm's overview */
+	Monitor *m = selmon;
+	struct wlr_box b;
+	double z;
+	int margin;
+
+	if (!DRIFTLT(m) || m->w.width <= 0 || m->w.height <= 0)
+		return;
+	driftbounds(m, m->ws, 0, &b);
+	margin = MAX(16, gappx * 2);
+	b.x -= margin;
+	b.y -= margin;
+	b.width += 2 * margin;
+	b.height += 2 * margin;
+	z = MIN((double)m->w.width / b.width, (double)m->w.height / b.height);
+	z = MIN((double)drift_zoom_max, MAX((double)drift_zoom_min, z));
+	m->camz[m->ws] = z;
+	m->camx[m->ws] = b.x + b.width / 2.0 - m->w.width / (2.0 * z);
+	m->camy[m->ws] = b.y + b.height / 2.0 - m->w.height / (2.0 * z);
+	driftarrange(m);
+}
+
+void
+driftpankey(const Arg *arg)
+{
+	/* Mod+Ctrl+arrow pans the camera; the other layouts keep swapping windows */
+	Monitor *m = selmon;
+	double z, stepx, stepy;
+
+	if (!DRIFTLT(m)) {
+		swapdir(arg);
+		return;
+	}
+	z = driftz(m, m->ws);
+	stepx = m->w.width / z / 4.0;
+	stepy = m->w.height / z / 4.0;
+	m->camx[m->ws] += arg->i == DirLeft ? -stepx : arg->i == DirRight ? stepx : 0;
+	m->camy[m->ws] += arg->i == DirUp ? -stepy : arg->i == DirDown ? stepy : 0;
+	driftarrange(m);
+}
+
+void
+driftpan(const Arg *arg)
+{
+	/* Mod+Shift+drag grabs the canvas itself and pulls it under the cursor.
+	 * The wheel only pans over bare canvas and the three-finger swipe needs a
+	 * touchpad, so this is how a plain mouse gets around a covered canvas. */
+	Monitor *m = xytomon(cursor->x, cursor->y);
+
+	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+		return;
+	if (!DRIFTLT(m))
+		return;
+	grabc = NULL;
+	grabm = m;
+	grab_startx = cursor->x;
+	grab_starty = cursor->y;
+	grab_camx = m->camx[m->ws];
+	grab_camy = m->camy[m->ws];
+	cursor_mode = CurDriftPan;
+	wlr_cursor_set_xcursor(cursor, cursor_mgr, "grabbing");
+}
+
+void
+driftpanto(double cx, double cy)
+{
+	/* driftarrange() calls motionnotify() again, so keep this re-entrant
+	 * safe and quiet when the camera did not actually move */
+	static int busy;
+	Monitor *m = grabm;
+	double z, camx, camy;
+
+	if (busy || !DRIFTLT(m) || m->w.width <= 0 || m->w.height <= 0)
+		return;
+	z = driftz(m, m->ws);
+	camx = grab_camx - (cx - grab_startx) / z;
+	camy = grab_camy - (cy - grab_starty) / z;
+	if (camx == m->camx[m->ws] && camy == m->camy[m->ws])
+		return;
+	m->camx[m->ws] = camx;
+	m->camy[m->ws] = camy;
+	busy = 1;
+	driftarrange(m);
+	busy = 0;
+}
+
+void
+driftnudge(const Arg *arg)
+{
+	/* Mod+Shift+arrow nudges the window; snapping still applies */
+	Client *sel = focustop(selmon);
+	struct wlr_box box;
+
+	if (!sel || !drifttiled(sel, selmon, selmon->ws))
+		return;
+	/* no snapping here: the keyboard is how you place a window precisely,
+	 * and a snap wider than the step would swallow every nudge */
+	box = sel->canvas;
+	box.x += arg->i == DirLeft ? -drift_nudge : arg->i == DirRight ? drift_nudge : 0;
+	box.y += arg->i == DirUp ? -drift_nudge : arg->i == DirDown ? drift_nudge : 0;
+	driftmove(sel, box.x - sel->canvas.x, box.y - sel->canvas.y, 0);
+	driftreveal(selmon, sel);
+	arrange(selmon);
+}
+
+void
+driftdragto(Client *c, double cx, double cy)
+{
+	/* drag on the canvas: snap to the neighbours and auto-pan at the edges.
+	 * arrange() calls motionnotify() again, so this has to be re-entrant
+	 * safe and quiet when nothing actually moved */
+	static int busy;
+	Monitor *m = c->mon;
+	struct wlr_box box;
+	double z, edge, oldcamx, oldcamy;
+
+	if (busy || !m || !c->oncanvas || c->isfloating)
+		return;
+	z = driftz(m, c->ws);
+	oldcamx = m->camx[c->ws];
+	oldcamy = m->camy[c->ws];
+	edge = MAX(16.0, MIN(48.0, m->w.width / 24.0));
+	if (cx < m->w.x + edge)
+		m->camx[c->ws] -= (m->w.x + edge - cx) / z;
+	else if (cx > m->w.x + m->w.width - edge)
+		m->camx[c->ws] += (cx - (m->w.x + m->w.width - edge)) / z;
+	if (cy < m->w.y + edge)
+		m->camy[c->ws] -= (m->w.y + edge - cy) / z;
+	else if (cy > m->w.y + m->w.height - edge)
+		m->camy[c->ws] += (cy - (m->w.y + m->w.height - edge)) / z;
+
+	box = c->canvas;
+	box.x = (int)round((cx - grabcx - m->w.x) / z + m->camx[c->ws]);
+	box.y = (int)round((cy - grabcy - m->w.y) / z + m->camy[c->ws]);
+	driftsnap(m, c, &box);
+	if (box.x == c->canvas.x && box.y == c->canvas.y
+			&& m->camx[c->ws] == oldcamx && m->camy[c->ws] == oldcamy)
+		return;
+	driftmove(c, box.x - c->canvas.x, box.y - c->canvas.y, drift_dragcluster);
+	busy = 1;
+	driftarrange(m);
+	busy = 0;
+}
+
+void
+driftresizeto(Client *c, double cx, double cy)
+{
+	static int busy;
+	Monitor *m = c->mon;
+	double z;
+	int bw, w, h;
+
+	if (busy || !m || !c->oncanvas || c->isfloating)
+		return;
+	z = driftz(m, c->ws);
+	bw = 2 * (int)c->bw;
+	w = MAX(1 + bw, (int)round((cx - c->geom.x - bw) / z) + bw);
+	h = MAX(1 + bw, (int)round((cy - c->geom.y - bw) / z) + bw);
+	if (w == c->canvas.width && h == c->canvas.height)
+		return;
+	c->canvas.width = w;
+	c->canvas.height = h;
+	busy = 1;
+	driftarrange(m);
+	busy = 0;
+}
+
+/* --- rendering the camera zoom ---
+ * wlroots has no scale on a scene tree, so the zoom is applied to the client's
+ * buffers: the destination size is scaled while the source box wlroots
+ * computed is left alone.  Every value below is derived from protocol state,
+ * so re-running this over an already scaled tree is a no-op — which is what
+ * lets it run again after each commit and on every frame. */
+typedef struct {
+	struct wlr_surface *surface;
+	int x, y;
+} DriftSurface;
+
+typedef struct {
+	DriftSurface list[24];
+	int n;
+	double z;
+	int ox, oy;          /* where the clip origin lands on screen */
+	struct wlr_box clip; /* unscaled, in surface-local coordinates */
+} DriftScale;
+
+static void
+driftcollect(struct wlr_surface *surface, int sx, int sy, void *data)
+{
+	DriftScale *ds = data;
+
+	if (ds->n < (int)LENGTH(ds->list)) {
+		ds->list[ds->n].surface = surface;
+		ds->list[ds->n].x = sx;
+		ds->list[ds->n].y = sy;
+		ds->n++;
+	}
+}
+
+static void
+driftscalebuf(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
+{
+	DriftScale *ds = data;
+	struct wlr_scene_surface *s = wlr_scene_surface_try_from_buffer(buffer);
+	int i, x1, y1, x2, y2, tx, ty;
+
+	if (!s)
+		return;
+	for (i = 0; i < ds->n && ds->list[i].surface != s->surface; i++);
+	if (i == ds->n)
+		return;
+	/* the part of this surface that survives the clip, unscaled */
+	x1 = MAX(ds->list[i].x, ds->clip.x);
+	y1 = MAX(ds->list[i].y, ds->clip.y);
+	x2 = MIN(ds->list[i].x + s->surface->current.width,
+			ds->clip.x + ds->clip.width);
+	y2 = MIN(ds->list[i].y + s->surface->current.height,
+			ds->clip.y + ds->clip.height);
+	if (x2 <= x1 || y2 <= y1)
+		return;
+	tx = ds->ox + (int)round((x1 - ds->clip.x) * ds->z);
+	ty = ds->oy + (int)round((y1 - ds->clip.y) * ds->z);
+	wlr_scene_buffer_set_dest_size(buffer,
+			MAX(1, (int)round((x2 - x1) * ds->z)),
+			MAX(1, (int)round((y2 - y1) * ds->z)));
+	wlr_scene_buffer_set_filter_mode(buffer, WLR_SCALE_FILTER_BILINEAR);
+	wlr_scene_node_set_position(&buffer->node,
+			buffer->node.x + tx - sx, buffer->node.y + ty - sy);
+}
+
+static void
+driftscalesurface(struct wlr_scene_tree *tree, struct wlr_surface *surface,
+		double z, int ox, int oy, const struct wlr_box *clip)
+{
+	DriftScale ds = {.n = 0, .z = z, .ox = ox, .oy = oy, .clip = *clip};
+
+	wlr_surface_for_each_surface(surface, driftcollect, &ds);
+	wlr_scene_node_for_each_buffer(&tree->node, driftscalebuf, &ds);
+}
+
+static void
+driftscalepopups(struct wl_list *popups, double z, int ox, int oy)
+{
+	/* popups hang off the client's tree, so they are scaled separately;
+	 * their position comes from the protocol, never from the scene.
+	 * ox/oy is the parent's geometry origin inside the tree the popup is
+	 * parented to, which is (border, border) for a toplevel's popups and
+	 * (0, 0) for a popup of a popup. */
+	struct wlr_xdg_popup *p;
+	struct wlr_scene_tree *tree;
+	struct wlr_box clip;
+	int tx, ty;
+
+	wl_list_for_each(p, popups, link) {
+		if (!(tree = p->base->surface->data))
+			continue;
+		clip = p->base->geometry;
+		if (clip.width <= 0 || clip.height <= 0)
+			continue;
+		tx = ox + (int)round(p->current.geometry.x * z);
+		ty = oy + (int)round(p->current.geometry.y * z);
+		wlr_scene_node_set_position(&tree->node, tx, ty);
+		driftscalesurface(tree, p->base->surface, z, tx, ty, &clip);
+		driftscalepopups(&p->base->popups, z, 0, 0);
+	}
+}
+
+void
+driftscaleclient(Client *c, double z)
+{
+	/* wlr_scene_node_for_each_buffer() counts from the parent of the node it
+	 * is given, so everything here is relative to the client's scene tree —
+	 * which also keeps the open and retile animations working */
+	struct wlr_box clip;
+	int bw = (int)c->bw;
+
+	if (!c->scene || !c->scene_surface || !client_surface(c)->mapped)
+		return;
+	client_get_clip(c, &clip);
+	clip.width = MAX(1, c->canvas.width - bw);
+	clip.height = MAX(1, c->canvas.height - bw);
+	driftscalesurface(c->scene_surface, client_surface(c), z, bw, bw, &clip);
+#ifdef XWAYLAND
+	if (c->type != XDGShell)
+		return;
+#endif
+	driftscalepopups(&c->surface.xdg->popups, z, bw, bw);
+}
+
+/* --- scaling a live window for the open animation ---
+ * The same trick as the camera zoom: the frame is drawn at the animated size
+ * and the buffers are stretched to match, so the client never sees a resize
+ * and keeps painting real content while it grows. */
+void
+clientscale(Client *c, float z)
+{
+	/* popups are left alone: a window that just mapped has none, and one
+	 * that shows up mid-animation is better placed than half scaled */
+	struct wlr_box clip;
+	int bw, w, h, r;
+
+	if (!c->scene || !c->scene_surface || !client_surface(c)->mapped)
+		return;
+	if (z >= 1.0f) {
+		clientunscale(c);
+		return;
+	}
+	bw = (int)roundf(c->bw * z);
+	w = MAX(1 + 2 * bw, (int)roundf(c->geom.width * z));
+	h = MAX(1 + 2 * bw, (int)roundf(c->geom.height * z));
+	r = (c->isfullscreen || c->isfakefull) ? 0
+			: MIN(MAX(0, (int)roundf(corner_radius * z)), MIN(w, h) / 2);
+	clientborders(c, w, h, bw, r);
+	client_get_clip(c, &clip);
+	driftscalesurface(c->scene_surface, client_surface(c), z, bw, bw, &clip);
+	c->anim.scale = z;
+}
+
+void
+clientunscale(Client *c)
+{
+	/* one pass at 1:1 puts every buffer back on the size and position
+	 * wlroots computed for it, the same way the camera zoom returns */
+	struct wlr_box clip;
+	int bw = (int)c->bw, r;
+
+	if (c->anim.scale == 0.0f || c->anim.scale >= 1.0f)
+		return;
+	c->anim.scale = 1.0f;
+	if (!c->scene || !c->scene_surface || !client_surface(c)->mapped)
+		return;
+	r = (c->isfullscreen || c->isfakefull) ? 0
+			: MIN(MAX(0, corner_radius),
+					MIN(c->geom.width, c->geom.height) / 2);
+	clientborders(c, c->geom.width, c->geom.height, bw, r);
+	client_get_clip(c, &clip);
+	driftscalesurface(c->scene_surface, client_surface(c), 1.0, bw, bw, &clip);
+}
+
+void
+driftapply(Monitor *m)
+{
+	/* wlroots resets buffer sizes whenever a client commits, so the camera
+	 * zoom is re-applied once per frame, before anything reads the buffers */
+	Client *c;
+	double z;
+
+	if (!DRIFTLT(m))
+		return;
+	z = driftz(m, m->ws);
+	/* at 1:1 the scene graph is already right, except for the one pass that
+	 * puts the buffers back after a zoom */
+	if (z == 1.0 && !m->driftscaled)
+		return;
+	wl_list_for_each(c, &clients, link) {
+		if (!drifttiled(c, m, m->ws) || !VISIBLEON(c, m)
+				|| c->isfullscreen || c->isfakefull)
+			continue;
+		driftscaleclient(c, z);
+	}
+	m->driftscaled = z != 1.0;
+}
+
+static void
+driftarrange(Monitor *m)
+{
+	/* camera moves are direct manipulation: retile without easing */
+	int oldanim = animations;
+
+	animations = 0;
+	arrange(m);
+	animations = oldanim;
+}
+
+void
+attachclient(Monitor *m, unsigned int ws, Client *c)
+{
+	if (SCROLLLT(m))
+		scroll_attach(m, ws, c);
+	else if (DRIFTLT(m))
+		driftattach(m, ws, c);
+	else
+		bsp_attach(m, ws, c);
+}
+
+void
+detachclient(Client *c)
+{
+	/* detach from whichever layout currently holds the client */
+	if (c->oncanvas)
+		driftdetach(c);
+	else if (c->col)
+		scroll_detach(c);
+	else
+		bsp_detach(c);
+}
+
+void
+setlayout(Monitor *m, unsigned int lt)
+{
+	/* move every window of every workspace into the new layout, keeping the
+	 * order they are in now */
+	Client *c, *sel;
+	unsigned int ws;
+
+	if (!m || lt >= LtLast || m->lt == lt)
+		return;
+	sel = focustop(m);
+	for (ws = 0; ws < NUMWS; ws++) {
+		wl_list_for_each(c, &clients, link) {
+			if (LTMIGRATE(c, m, ws) && (c->node || c->col || c->oncanvas))
+				detachclient(c);
+		}
+		m->scrollx[ws] = 0;
+		m->camx[ws] = m->camy[ws] = 0.0;
+		m->camz[ws] = 1.0;
+	}
+	m->lt = lt;
+	savelayoutstate(lt);
+	/* windows are re-attached in tiling order, and the canvas starts out as
+	 * a copy of the screen, so nothing jumps around */
+	lt_migrating = 1;
+	for (ws = 0; ws < NUMWS; ws++) {
+		wl_list_for_each(c, &clients, link) {
+			if (LTMIGRATE(c, m, ws))
+				attachclient(m, ws, c);
+		}
+	}
+	lt_migrating = 0;
+	arrange(m);
+	ipcnotifyall();
+	if (sel) {
+		focusclient(sel, 1);
+		warpto(sel);
+	}
+}
+
+void
+togglelayout(const Arg *arg)
+{
+	if (selmon)
+		setlayout(selmon, (selmon->lt + 1) % LtLast);
+}
+
+void
+setlayoutarg(const Arg *arg)
+{
+	if (selmon)
+		setlayout(selmon, arg->ui);
+}
+
+void
+consumewin(const Arg *arg)
+{
+	/* pull the first window of the next column into this one (niri consume) */
+	Client *sel = focustop(selmon), *t;
+	Column *next;
+
+	if (!SCROLLLT(selmon) || !sel || !sel->col)
+		return;
+	if (sel->col->link.next == &selmon->cols[sel->ws])
+		return;
+	next = wl_container_of(sel->col->link.next, next, link);
+	t = wl_container_of(next->clients.next, t, clink);
+	scroll_detach(t);
+	scroll_addclient(sel->col, t, sel->ws);
+	arrange(selmon);
+	warpto(sel);
+}
+
+void
+expelwin(const Arg *arg)
+{
+	/* push the focused window out into its own column to the right (niri expel) */
+	Client *sel = focustop(selmon);
+	Column *col;
+
+	if (!SCROLLLT(selmon) || !sel || !sel->col
+			|| wl_list_length(&sel->col->clients) < 2)
+		return;
+	col = sel->col;
+	wl_list_remove(&sel->clink);
+	sel->col = NULL;
+	scroll_addclient(scroll_addcol(selmon, sel->ws, &col->link), sel, sel->ws);
+	arrange(selmon);
+	warpto(sel);
+}
+
 void
 buttonpress(struct wl_listener *listener, void *data)
 {
@@ -1388,6 +2917,10 @@ buttonpress(struct wl_listener *listener, void *data)
 	const Button *b;
 
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+	/* clicking while Super is held is not a bare Super tap */
+	if (super_group && super_group->super_down
+			&& event->state == WL_POINTER_BUTTON_STATE_PRESSED)
+		super_group->super_alone = 0;
 	if (overview_visible || overview_button_swallow) {
 		overviewbutton(event);
 		return;
@@ -1408,6 +2941,14 @@ buttonpress(struct wl_listener *listener, void *data)
 		keyboard = wlr_seat_get_keyboard(seat);
 		mods = keyboard ? wlr_keyboard_get_modifiers(keyboard) : 0;
 		for (b = buttons; b < END(buttons); b++) {
+			/* Alt bindings exist for driftwm muscle memory; outside the
+			 * drift layout Alt+click belongs to the application */
+			if ((b->mod & WLR_MODIFIER_ALT) && !DRIFTLT(selmon))
+				continue;
+			/* there is no camera to pan in the other layouts, so let the
+			 * click through instead of swallowing it */
+			if (b->func == driftpan && !DRIFTLT(selmon))
+				continue;
 			if (CLEANMASK(mods) == CLEANMASK(b->mod) &&
 					event->button == b->button && b->func) {
 				b->func(&b->arg);
@@ -1420,11 +2961,25 @@ buttonpress(struct wl_listener *listener, void *data)
 		/* TODO: should reset to the pointer focus's current setcursor */
 		if (!locked && cursor_mode != CurNormal && cursor_mode != CurPressed) {
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+			if (cursor_mode == CurMove || cursor_mode == CurResize) {
+				/* Drop the window off on its new monitor */
+				selmon = xytomon(cursor->x, cursor->y);
+				setmon(grabc, selmon, -1);
+			} else if ((cursor_mode == CurDragTile
+					|| cursor_mode == CurDriftMove
+					|| cursor_mode == CurDriftResize) && grabc) {
+				Monitor *dropmon = xytomon(cursor->x, cursor->y);
+				if (dropmon && dropmon != grabc->mon) {
+					/* a canvas window keeps the spot it was dropped on,
+					 * translated onto the other monitor's canvas */
+					lt_migrating = DRIFTLT(dropmon) && grabc->oncanvas;
+					setmon(grabc, dropmon, -1);
+					lt_migrating = 0;
+				}
+			}
 			cursor_mode = CurNormal;
-			/* Drop the window off on its new monitor */
-			selmon = xytomon(cursor->x, cursor->y);
-			setmon(grabc, selmon, -1);
 			grabc = NULL;
+			grabm = NULL;
 			return;
 		}
 		cursor_mode = CurNormal;
@@ -1506,6 +3061,17 @@ cleanupmon(struct wl_listener *listener, void *data)
 			wlr_layer_surface_v1_destroy(l->layer_surface);
 	}
 
+	if (grabm == m) {
+		grabm = NULL;
+		if (cursor_mode == CurDriftPan)
+			cursor_mode = CurNormal;
+	}
+
+	if (m->unblock) {
+		wl_event_source_remove(m->unblock);
+		m->unblock = NULL;
+	}
+
 	wl_list_remove(&m->destroy.link);
 	wl_list_remove(&m->frame.link);
 	wl_list_remove(&m->link);
@@ -1533,6 +3099,9 @@ cleanuplisteners(void)
 	wl_list_remove(&cursor_swipe_begin.link);
 	wl_list_remove(&cursor_swipe_end.link);
 	wl_list_remove(&cursor_swipe_update.link);
+	wl_list_remove(&cursor_pinch_begin.link);
+	wl_list_remove(&cursor_pinch_update.link);
+	wl_list_remove(&cursor_pinch_end.link);
 	wl_list_remove(&gpu_reset.link);
 	wl_list_remove(&new_idle_inhibitor.link);
 	wl_list_remove(&layout_change.link);
@@ -1654,7 +3223,22 @@ commitnotify(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	resize(c, c->geom, (c->isfloating && !c->isfullscreen));
+	if (DRIFTLT(c->mon) && c->oncanvas && !c->isfloating && !c->isfullscreen
+			&& !c->isfakefull) {
+		/* on the canvas the client owns its size: follow whatever it asked
+		 * for, then place that box under the camera again */
+		struct wlr_box geo, box;
+		client_get_geometry(c, &geo);
+		if (!c->resize && geo.width > 0 && geo.height > 0) {
+			c->canvas.width = geo.width + 2 * (int)c->bw;
+			c->canvas.height = geo.height + 2 * (int)c->bw;
+			c->canvassized = 1;
+		}
+		driftscreen(c->mon, c, &box);
+		resize(c, box, 0);
+	} else {
+		resize(c, c->geom, (c->isfloating && !c->isfullscreen));
+	}
 
 	/* mark a pending resize as completed */
 	if (c->resize && c->resize <= c->surface.xdg->current.configure_serial)
@@ -1857,6 +3441,12 @@ createmon(struct wl_listener *listener, void *data)
 
 	for (i = 0; i < LENGTH(m->layers); i++)
 		wl_list_init(&m->layers[i]);
+	for (i = 0; i < NUMWS; i++) {
+		wl_list_init(&m->cols[i]);
+		m->camz[i] = 1.0;
+	}
+	m->lt = default_layout >= 0 && default_layout < LtLast
+			? (unsigned int)default_layout : LtBSP;
 
 	wlr_output_state_init(&state);
 	/* Initialize monitor state using configured rules */
@@ -1875,6 +3465,8 @@ createmon(struct wl_listener *listener, void *data)
 	 * monitor's preferred mode; a more sophisticated compositor would let
 	 * the user configure it. */
 	wlr_output_state_set_mode(&state, wlr_output_preferred_mode(wlr_output));
+
+	m->unblock = wl_event_loop_add_timer(event_loop, monunblock, m);
 
 	/* Set up event listeners */
 	LISTEN(&wlr_output->events.frame, &m->frame, rendermon);
@@ -2193,6 +3785,8 @@ dirpick(Monitor *m, Client *from, int dir)
 
 	if (!from)
 		return NULL;
+	if (DRIFTLT(m) && from->oncanvas && !from->isfloating)
+		return driftpick(m, from, dir);
 	fx1 = from->geom.x;
 	fy1 = from->geom.y;
 	fx2 = from->geom.x + from->geom.width;
@@ -2338,11 +3932,28 @@ void
 focusdir(const Arg *arg)
 {
 	Client *sel = focustop(selmon), *c;
+	if (SCROLLLT(selmon) && sel
+			&& (sel->isfullscreen || sel->isfakefull)) {
+		/* niri: moving focus out of fullscreen just resizes the window
+		 * back into its column, then the move proceeds */
+		if (sel->isfullscreen)
+			setfullscreen(sel, 0);
+		if (sel->isfakefull) {
+			sel->isfakefull = 0;
+			applyeffects(sel);
+			applyfakefull(sel);
+			arrange(selmon);
+		}
+	}
 	if (selmon && (!sel || sel->isfullscreen || sel->isfakefull
 			|| !(c = dirpick(selmon, sel, arg->i)))) {
-		/* nothing in that direction: step to the neighbouring workspace */
-		if (arg->i == DirLeft || arg->i == DirRight) {
-			Arg a = {.i = arg->i == DirLeft ? -1 : +1};
+		/* nothing in that direction: step to the neighbouring workspace.
+		 * The scroll layout stacks workspaces vertically like niri, so
+		 * there the vertical axis changes workspace instead. */
+		if (SCROLLLT(selmon)
+				? (arg->i == DirUp || arg->i == DirDown)
+				: (arg->i == DirLeft || arg->i == DirRight)) {
+			Arg a = {.i = (arg->i == DirLeft || arg->i == DirUp) ? -1 : +1};
 			wsstep(&a);
 		}
 		return;
@@ -2350,16 +3961,53 @@ focusdir(const Arg *arg)
 	if (!selmon)
 		return;
 	focusclient(c, 1);
+	if (SCROLLLT(selmon)) {
+		arrange(selmon); /* scroll the focused column into view */
+	} else if (DRIFTLT(selmon)) {
+		driftreveal(selmon, c); /* pan the camera onto the new window */
+		driftarrange(selmon);
+	}
 	warpto(c);
 }
 
 void
 focusnext(const Arg *arg)
 {
-	Client *sel = focustop(selmon);
+	Client *sel = focustop(selmon), *c;
 	Node *n;
-	if (!sel || sel->isfullscreen || sel->isfakefull || !sel->node || !selmon)
+	if (!sel || sel->isfullscreen || sel->isfakefull || !selmon
+			|| (!sel->node && !sel->col && !sel->oncanvas))
 		return;
+	if (sel->oncanvas) {
+		/* walk the windows of this canvas in tiling order */
+		struct wl_list *pos = sel->link.next;
+		for (;;) {
+			if (pos == &clients) {
+				pos = clients.next;
+				continue;
+			}
+			c = wl_container_of(pos, c, link);
+			if (c == sel)
+				return;
+			if (drifttiled(c, selmon, selmon->ws))
+				break;
+			pos = pos->next;
+		}
+		focusclient(c, 1);
+		driftreveal(selmon, c);
+		driftarrange(selmon);
+		warpto(c);
+		return;
+	}
+	if (sel->col) {
+		c = scroll_next(selmon, sel);
+		if (c != sel) {
+			focusclient(c, 1);
+			arrange(selmon);
+			warpto(c);
+		}
+		return;
+	}
 	n = bsp_nextleaf(selmon->tree[sel->ws], sel->node);
 	if (n && n->c != sel) {
 		focusclient(n->c, 1);
@@ -2552,6 +4200,10 @@ ipcsetclienttags(struct wl_client *client, struct wl_resource *resource,
 static void
 ipcsetlayout(struct wl_client *client, struct wl_resource *resource, uint32_t index)
 {
+	IpcOutput *io = wl_resource_get_user_data(resource);
+
+	if (io && io->mon && index < LtLast)
+		setlayout(io->mon, index);
 }
 
 static void
@@ -2604,14 +4256,15 @@ ipcstatus(IpcOutput *io)
 						: ZDWL_IPC_OUTPUT_V2_TAG_STATE_NONE,
 				wscnt[i], sel && sel->ws == (unsigned int)i);
 	}
-	zdwl_ipc_output_v2_send_layout(io->resource, 0);
+	zdwl_ipc_output_v2_send_layout(io->resource, m->lt);
 	title = sel ? client_get_title(sel) : NULL;
 	appid = sel ? client_get_appid(sel) : NULL;
 	zdwl_ipc_output_v2_send_title(io->resource, title ? title : "");
 	if (version >= ZDWL_IPC_OUTPUT_V2_APPID_SINCE_VERSION)
 		zdwl_ipc_output_v2_send_appid(io->resource, appid ? appid : "");
 	if (version >= ZDWL_IPC_OUTPUT_V2_LAYOUT_SYMBOL_SINCE_VERSION)
-		zdwl_ipc_output_v2_send_layout_symbol(io->resource, "bsp");
+		zdwl_ipc_output_v2_send_layout_symbol(io->resource,
+				m->lt == LtScroll ? "scroll" : m->lt == LtDrift ? "drift" : "bsp");
 	if (version >= ZDWL_IPC_OUTPUT_V2_FULLSCREEN_SINCE_VERSION)
 		zdwl_ipc_output_v2_send_fullscreen(io->resource,
 				sel && (sel->isfullscreen || sel->isfakefull));
@@ -2667,6 +4320,8 @@ ipcmgrbind(struct wl_client *client, void *data, uint32_t version, uint32_t id)
 	wl_resource_set_implementation(res, &ipc_manager_impl, NULL, NULL);
 	zdwl_ipc_manager_v2_send_tags(res, NUMWS);
 	zdwl_ipc_manager_v2_send_layout(res, "bsp");
+	zdwl_ipc_manager_v2_send_layout(res, "scroll");
+	zdwl_ipc_manager_v2_send_layout(res, "drift");
 }
 /* --- end dwl-ipc --- */
 
@@ -2748,6 +4403,24 @@ overviewwindowbox(Monitor *m, Client *c, const struct wlr_box *panel)
 	float scalex = (float)panel->width / m->w.width;
 	float scaley = (float)panel->height / m->w.height;
 
+	if (DRIFTLT(m) && c->oncanvas && !c->isfloating
+			&& !c->isfullscreen && !c->isfakefull) {
+		/* the card shows the whole canvas, not just the viewport */
+		struct wlr_box b;
+		float scale;
+
+		driftbounds(m, c->ws, 1, &b);
+		scale = MIN((float)panel->width / MAX(1, b.width),
+				(float)panel->height / MAX(1, b.height));
+		return (struct wlr_box){
+			.x = panel->x + (panel->width - (int)roundf(b.width * scale)) / 2
+					+ (int)roundf((c->canvas.x - b.x) * scale),
+			.y = panel->y + (panel->height - (int)roundf(b.height * scale)) / 2
+					+ (int)roundf((c->canvas.y - b.y) * scale),
+			.width = MAX(4, (int)roundf(c->canvas.width * scale)),
+			.height = MAX(4, (int)roundf(c->canvas.height * scale)),
+		};
+	}
 	if (geo.width <= 0 || geo.height <= 0)
 		geo = m->w;
 	return (struct wlr_box){
@@ -2760,7 +4433,7 @@ overviewwindowbox(Monitor *m, Client *c, const struct wlr_box *panel)
 
 static void
 overviewwindowdraw(struct wlr_scene_tree *tree, Client *c,
-		const struct wlr_box *box, float opacity)
+		const struct wlr_box *box, float opacity, int focused)
 {
 	float shadowcolor[] = {0.0f, 0.0f, 0.0f, 0.55f * opacity};
 	float windowcolor[] = {0.055f * opacity, 0.055f * opacity,
@@ -2780,6 +4453,18 @@ overviewwindowdraw(struct wlr_scene_tree *tree, Client *c,
 	shadow = wlr_scene_shadow_create(tree, box->width, box->height,
 			radius, 12.0f, shadowcolor);
 	wlr_scene_node_set_position(&shadow->node, box->x, box->y + 3);
+	if (focused && !decorhidden && borderpx > 0) {
+		/* focus ring behind the clone, like the live focus border */
+		const float *fc = focuscolorfor();
+		float bcolor[] = {fc[0] * opacity, fc[1] * opacity,
+			fc[2] * opacity, fc[3] * opacity};
+		int fbw = MAX(2, (int)roundf(borderpx * scale) + 1);
+		struct wlr_scene_rect *ring = wlr_scene_rect_create(tree,
+				box->width + 2 * fbw, box->height + 2 * fbw, bcolor);
+		wlr_scene_rect_set_corner_radius(ring, radius + fbw,
+				CORNER_LOCATION_ALL);
+		wlr_scene_node_set_position(&ring->node, box->x - fbw, box->y - fbw);
+	}
 	content = wlr_scene_tree_create(tree);
 	back = wlr_scene_rect_create(content, box->width, box->height, windowcolor);
 	wlr_scene_rect_set_corner_radius(back, radius, CORNER_LOCATION_ALL);
@@ -2808,11 +4493,11 @@ overviewwindowdraw(struct wlr_scene_tree *tree, Client *c,
 
 static void
 overviewwindow(struct wlr_scene_tree *tree, Monitor *m, Client *c,
-		const struct wlr_box *panel, float opacity)
+		const struct wlr_box *panel, float opacity, int focused)
 {
 	struct wlr_box box = overviewwindowbox(m, c, panel);
 
-	overviewwindowdraw(tree, c, &box, opacity);
+	overviewwindowdraw(tree, c, &box, opacity, focused);
 }
 
 static void
@@ -2826,11 +4511,17 @@ overviewpanel(Monitor *m, unsigned int ws, const struct wlr_box *box, float opac
 	struct wlr_scene_rect *panel, *shade;
 	struct wlr_scene_shadow *shadow;
 	LayerSurface *l;
-	Client *c;
+	Client *c, *focus = NULL;
 	OverviewClone oc;
 
 	if (opacity <= 0.0f)
 		return;
+	/* the focus ring marks the window the strip is parked on, which only
+	 * means something in the scroll layout */
+	if (ws == m->ws && SCROLLLT(m))
+		focus = overview_focus_client && overview_focus_client->mon == m
+				&& overview_focus_client->ws == ws
+				? overview_focus_client : wsfocusedany(m, ws);
 	tree = wlr_scene_tree_create(overview_panels_scene);
 	oc = (OverviewClone){
 		.tree = tree,
@@ -2860,7 +4551,7 @@ overviewpanel(Monitor *m, unsigned int ws, const struct wlr_box *box, float opac
 	wl_list_for_each_reverse(c, &clients, link) {
 		if (c->mon == m && c->ws == ws
 				&& (!overview_dragging || c != overview_drag_client))
-			overviewwindow(tree, m, c, box, opacity);
+			overviewwindow(tree, m, c, box, opacity, c == focus);
 	}
 }
 
@@ -2882,8 +4573,14 @@ overviewtargets(Monitor *m, struct wlr_box boxes[3])
 
 	margin = MAX(24, MIN(64, MIN(m->w.width, m->w.height) / 18));
 	gap = MAX(24, margin / 2);
-	scale = MIN((m->w.height - 2.0f * margin) / m->m.height,
-			(m->w.width * 0.72f) / m->m.width);
+	if (SCROLLLT(m)) {
+		/* niri stacks workspaces vertically: prev above, next below */
+		scale = MIN((m->w.width - 2.0f * margin) / m->m.width,
+				(m->w.height * 0.72f) / m->m.height);
+	} else {
+		scale = MIN((m->w.height - 2.0f * margin) / m->m.height,
+				(m->w.width * 0.72f) / m->m.width);
+	}
 	scale = MIN(0.88f, MAX(0.20f, scale));
 	width = MAX(1, (int)roundf(m->m.width * scale));
 	height = MAX(1, (int)roundf(m->m.height * scale));
@@ -2894,12 +4591,21 @@ overviewtargets(Monitor *m, struct wlr_box boxes[3])
 		.y = m->w.y + (m->w.height - height) / 2,
 		.width = width, .height = height,
 	};
-	*left = *right = (struct wlr_box){
-		.y = m->w.y + (m->w.height - sideheight) / 2,
-		.width = sidewidth, .height = sideheight,
-	};
-	left->x = center->x - sidewidth - gap;
-	right->x = center->x + width + gap;
+	if (SCROLLLT(m)) {
+		*left = *right = (struct wlr_box){
+			.x = m->w.x + (m->w.width - sidewidth) / 2,
+			.width = sidewidth, .height = sideheight,
+		};
+		left->y = center->y - sideheight - gap;
+		right->y = center->y + height + gap;
+	} else {
+		*left = *right = (struct wlr_box){
+			.y = m->w.y + (m->w.height - sideheight) / 2,
+			.width = sidewidth, .height = sideheight,
+		};
+		left->x = center->x - sidewidth - gap;
+		right->x = center->x + width + gap;
+	}
 }
 
 static struct wlr_box
@@ -2967,6 +4673,28 @@ overviewadvance(Monitor *m, float dt)
 }
 
 static int
+overviewwatchdog(void *data)
+{
+	/* While the overview is up the tiling layers are switched off and only
+	 * overviewfinish() turns them back on, so a closing transition that
+	 * never reaches its last frame — an output that stopped sending them,
+	 * a failed commit — would leave the screen without a single window on
+	 * it, nothing to click and nothing to type into.  Never wait forever. */
+	Monitor *m;
+
+	if (overview_active || !overview_visible)
+		return 0;
+	wlr_log(WLR_ERROR, "overview close stalled; closing it by hand");
+	wl_list_for_each(m, &mons, link)
+		m->overview_animating = 0;
+	overviewfinish();
+	wl_list_for_each(m, &mons, link)
+		if (m->wlr_output->enabled)
+			wlr_output_schedule_frame(m->wlr_output);
+	return 0;
+}
+
+static int
 overviewallidle(void)
 {
 	Monitor *m;
@@ -2986,6 +4714,8 @@ overviewfinish(void)
 
 	if (overview_active || !overview_visible || !overviewallidle())
 		return;
+	if (overview_watchdog)
+		wl_event_source_timer_update(overview_watchdog, 0);
 	overview_visible = 0;
 	wlr_scene_node_set_enabled(&overview_scene->node, 0);
 	wlr_scene_node_set_enabled(&overview_dim_scene->node, 0);
@@ -3016,9 +4746,8 @@ overviewbuild(void)
 
 	overviewclear();
 	wl_list_for_each(m, &mons, link) {
-		float dimcolor[] = {0.06f * m->overview_dim,
-			0.06f * m->overview_dim, 0.065f * m->overview_dim,
-			0.30f * m->overview_dim};
+		/* light dim only, so the wallpaper stays visible as the backdrop */
+		float dimcolor[] = {0.0f, 0.0f, 0.0f, 0.18f * m->overview_dim};
 		struct wlr_scene_rect *dim;
 
 		if (!overviewvalid(m))
@@ -3113,8 +4842,8 @@ overviewmovetows(Client *c, Monitor *m, unsigned int ws)
 	if (c->mon != m) {
 		setmon(c, m, (int)ws);
 	} else if (c->ws != ws) {
-		bsp_detach(c);
-		bsp_attach(m, ws, c);
+		detachclient(c);
+		attachclient(m, ws, c);
 		arrange(m);
 	}
 }
@@ -3200,7 +4929,7 @@ overviewmotion(void)
 			overviewdragclear();
 			overview_drag_box.x = overview_drag_box.y = 0;
 			overviewwindowdraw(overview_drag_scene, overview_drag_client,
-					&overview_drag_box, 0.96f);
+					&overview_drag_box, 0.96f, 0);
 			overviewbuild();
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "grabbing");
 		}
@@ -3230,14 +4959,16 @@ overviewset(int active)
 	if (active == overview_active || (active && (locked || !selmon)))
 		return;
 	overview_active = active;
-	overview_axis_dx = overview_axis_dy = 0.0;
-	overview_axis_triggered = 0;
 	overview_swipe_active = overview_swipe_triggered = 0;
 	overview_swipe_dx = overview_swipe_dy = 0.0;
 	if (active) {
 		overview_focus_client = NULL;
 		if (!overview_visible) {
 			overview_visible = 1;
+			/* the previews clone the live buffers, so nothing may be
+			 * caught halfway through an open animation */
+			wl_list_for_each(m, &mons, link)
+				animstop(m);
 			focusclient(NULL, 0);
 			wlr_seat_pointer_notify_clear_focus(seat);
 			wlr_scene_node_set_enabled(&layers[LyrTile]->node, 0);
@@ -3250,10 +4981,15 @@ overviewset(int active)
 					continue;
 				overviewtargets(m, target);
 				m->overview[0] = target[0];
-				m->overview[0].x -= m->m.width;
 				m->overview[1] = m->m;
 				m->overview[2] = target[2];
-				m->overview[2].x += m->m.width;
+				if (SCROLLLT(m)) {
+					m->overview[0].y -= m->m.height;
+					m->overview[2].y += m->m.height;
+				} else {
+					m->overview[0].x -= m->m.width;
+					m->overview[2].x += m->m.width;
+				}
 				m->overview_opacity[0] = 0.0f;
 				m->overview_opacity[1] = 1.0f;
 				m->overview_opacity[2] = 0.0f;
@@ -3272,14 +5008,24 @@ overviewset(int active)
 		overview_drag_client = NULL;
 		overview_dragging = 0;
 		overviewdragclear();
+		/* the windows stay hidden until the closing transition ends, so
+		 * put a deadline on it */
+		if (overview_watchdog)
+			wl_event_source_timer_update(overview_watchdog,
+					MAX(500, animation_duration * 4));
 		wl_list_for_each(m, &mons, link) {
 			if (!overviewvalid(m))
 				continue;
 			for (i = 0; i < 3; i++)
 				end[i] = m->overview[i];
-			end[0].x -= m->m.width;
+			if (SCROLLLT(m)) {
+				end[0].y -= m->m.height;
+				end[2].y += m->m.height;
+			} else {
+				end[0].x -= m->m.width;
+				end[2].x += m->m.width;
+			}
 			end[1] = m->w;
-			end[2].x += m->m.width;
 			overviewtransition(m, end, closing, 0.0f);
 		}
 	}
@@ -3343,8 +5089,13 @@ overviewnavigate(unsigned int ws, int dir)
 		m->overview[0] = old[1];
 		m->overview[1] = old[2];
 		m->overview[2] = target[2];
-		distance = old[2].x - old[1].x;
-		m->overview[2].x = old[2].x + distance;
+		if (SCROLLLT(m)) {
+			distance = old[2].y - old[1].y;
+			m->overview[2].y = old[2].y + distance;
+		} else {
+			distance = old[2].x - old[1].x;
+			m->overview[2].x = old[2].x + distance;
+		}
 		m->overview_opacity[0] = oldopacity[1];
 		m->overview_opacity[1] = oldopacity[2];
 		m->overview_opacity[2] = 0.0f;
@@ -3352,8 +5103,13 @@ overviewnavigate(unsigned int ws, int dir)
 		m->overview[2] = old[1];
 		m->overview[1] = old[0];
 		m->overview[0] = target[0];
-		distance = old[1].x - old[0].x;
-		m->overview[0].x = old[0].x - distance;
+		if (SCROLLLT(m)) {
+			distance = old[1].y - old[0].y;
+			m->overview[0].y = old[0].y - distance;
+		} else {
+			distance = old[1].x - old[0].x;
+			m->overview[0].x = old[0].x - distance;
+		}
 		m->overview_opacity[2] = oldopacity[1];
 		m->overview_opacity[1] = oldopacity[0];
 		m->overview_opacity[0] = 0.0f;
@@ -3362,15 +5118,74 @@ overviewnavigate(unsigned int ws, int dir)
 	overviewbuild();
 }
 
+void
+overviewfocuscol(int dir)
+{
+	/* walk the focus along the strip inside the overview, like niri: the
+	 * center panel pans to follow the newly focused column */
+	static const float shown[] = {1.0f, 1.0f, 1.0f};
+	struct wlr_box target[3];
+	Monitor *m = selmon;
+	Client *sel, *t = NULL, *cc;
+	Column *cand = NULL, *it;
+	struct wl_list *pos;
+
+	if (!overview_active || !overviewvalid(m) || !SCROLLLT(m)
+			|| m->overview_animating)
+		return;
+	if (!(sel = wsfocused(m, m->ws)))
+		return;
+	for (pos = dir > 0 ? sel->col->link.next : sel->col->link.prev;
+			pos != &m->cols[m->ws];
+			pos = dir > 0 ? pos->next : pos->prev) {
+		it = wl_container_of(pos, it, link);
+		if (scroll_coltiled(it)) {
+			cand = it;
+			break;
+		}
+	}
+	if (!cand)
+		return;
+	wl_list_for_each(cc, &cand->clients, clink) {
+		if (!cc->isfloating) {
+			t = cc;
+			break;
+		}
+	}
+	if (!t)
+		return;
+	wl_list_remove(&t->flink);
+	wl_list_insert(&fstack, &t->flink);
+	overview_focus_client = t;
+	arrange(m); /* pans the strip to the new column */
+	overviewtargets(m, target);
+	/* a (no-move) transition forces the clones to rebuild every frame, so
+	 * the pan animation shows inside the panel */
+	overviewtransition(m, target, shown, 1.0f);
+	overviewbuild();
+}
+
 int
 overviewkey(xkb_keysym_t sym)
 {
+	int scroll = SCROLLLT(selmon);
+
 	sym = xkb_keysym_to_lower(sym);
 	if (sym == XKB_KEY_Escape || sym == XKB_KEY_Return) {
 		overviewset(0);
 	} else if (sym == XKB_KEY_Left || sym == XKB_KEY_h) {
-		overviewnavigate((selmon->ws + NUMWS - 1) % NUMWS, -1);
+		if (scroll)
+			overviewfocuscol(-1);
+		else
+			overviewnavigate((selmon->ws + NUMWS - 1) % NUMWS, -1);
 	} else if (sym == XKB_KEY_Right || sym == XKB_KEY_l) {
+		if (scroll)
+			overviewfocuscol(1);
+		else
+			overviewnavigate((selmon->ws + 1) % NUMWS, 1);
+	} else if (sym == XKB_KEY_Up || sym == XKB_KEY_k) {
+		overviewnavigate((selmon->ws + NUMWS - 1) % NUMWS, -1);
+	} else if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
 		overviewnavigate((selmon->ws + 1) % NUMWS, 1);
 	} else if (sym >= XKB_KEY_1 && sym <= XKB_KEY_9) {
 		unsigned int ws = (uint32_t)(sym - XKB_KEY_1);
@@ -3645,16 +5460,31 @@ mapnotify(struct wl_listener *listener, void *data)
 		applyrules(c);
 	}
 
-	/* Slide + fade the new window in */
-	if (animations && c->mon && VISIBLEON(c, c->mon)) {
+	/* Pop the new window in */
+	if (animations && animation_type_open != AnimNone && animation_duration_open > 0
+			&& c->mon && VISIBLEON(c, c->mon)) {
+		/* the drift camera owns the buffer scale of the windows it holds,
+		 * so a window opening on that canvas only slides and fades */
+		c->anim.zoom = animation_type_open == AnimZoom && !DRIFTLT(c->mon);
 		c->anim.from.x = c->geom.x;
-		c->anim.from.y = c->geom.y + MAX(14, MIN(32, c->geom.height / 18));
+		c->anim.from.y = c->geom.y + (animation_type_open == AnimSlide
+				? MAX(14, MIN(32, c->geom.height / 18)) : 0);
 		c->anim.fadein = 1;
 		c->anim.workspace = 0;
 		c->anim.hide = 0;
 		c->anim.active = 1;
 		c->anim.t = 0;
-		wlr_scene_node_set_position(&c->scene->node, c->anim.from.x, c->anim.from.y);
+		if (c->anim.zoom) {
+			clientscale(c, zoom_initial_ratio);
+			wlr_scene_node_set_position(&c->scene->node,
+					c->geom.x + (int)roundf(c->geom.width
+							* (1.0f - zoom_initial_ratio) / 2.0f),
+					c->geom.y + (int)roundf(c->geom.height
+							* (1.0f - zoom_initial_ratio) / 2.0f));
+		} else {
+			wlr_scene_node_set_position(&c->scene->node,
+					c->anim.from.x, c->anim.from.y);
+		}
 		if (c->surfbuf)
 			wlr_scene_buffer_set_opacity(c->surfbuf, 0);
 		animkick(c->mon);
@@ -3668,6 +5498,7 @@ unset_fullscreen:
 				setfullscreen(w, 0);
 			if (w->isfakefull) {
 				w->isfakefull = 0;
+				applyfakefull(w);
 				arrange(m);
 			}
 		}
@@ -3745,7 +5576,10 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
 			cursorconstrain(constraint);
 
-		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
+		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove
+				&& cursor_mode != CurDragTile && cursor_mode != CurResizeCol
+				&& cursor_mode != CurDriftMove && cursor_mode != CurDriftResize
+				&& cursor_mode != CurDriftPan) {
 			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
 			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
 				sx = cursor->x - c->geom.x - c->bw;
@@ -3784,6 +5618,36 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		resize(grabc, (struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y,
 			.width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1);
 		return;
+	} else if (cursor_mode == CurDragTile) {
+		if (grabc)
+			scroll_dragto(grabc, cursor->x);
+		return;
+	} else if (cursor_mode == CurDriftMove) {
+		if (grabc)
+			driftdragto(grabc, cursor->x, cursor->y);
+		return;
+	} else if (cursor_mode == CurDriftResize) {
+		if (grabc)
+			driftresizeto(grabc, cursor->x, cursor->y);
+		return;
+	} else if (cursor_mode == CurDriftPan) {
+		driftpanto(cursor->x, cursor->y);
+		return;
+	} else if (cursor_mode == CurResizeCol) {
+		if (grabc && grabc->col && grabc->mon && grabc->mon->w.width > 0) {
+			float f = grab_wfrac + (float)((cursor->x - grab_startx)
+					/ grabc->mon->w.width);
+			f = f < 0.15f ? 0.15f : f > 1.0f ? 1.0f : f;
+			if (fabsf(f - grabc->col->wfrac) >= 0.003f) {
+				/* direct manipulation: retile without easing */
+				int oldanim = animations;
+				grabc->col->wfrac = f;
+				animations = 0;
+				arrange(grabc->mon);
+				animations = oldanim;
+			}
+		}
+		return;
 	}
 
 	/* If there's no client surface under the cursor, set the cursor image to a
@@ -3819,9 +5683,42 @@ moveresize(const Arg *arg)
 	if (!grabc || client_is_unmanaged(grabc) || grabc->isfullscreen)
 		return;
 
+	if (DRIFTLT(grabc->mon) && grabc->oncanvas && !grabc->isfloating
+			&& !grabc->isfakefull) {
+		/* driftwm-style direct manipulation: drag moves the window across
+		 * the canvas, right-drag resizes it for real */
+		grabcx = (int)round(cursor->x) - grabc->geom.x;
+		grabcy = (int)round(cursor->y) - grabc->geom.y;
+		drift_dragcluster = arg->ui == CurDriftMove;
+		if (arg->ui == CurResize) {
+			cursor_mode = CurDriftResize;
+			wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
+		} else {
+			cursor_mode = CurDriftMove;
+			wlr_cursor_set_xcursor(cursor, cursor_mgr, "grabbing");
+		}
+		return;
+	}
+
+	if (SCROLLLT(grabc->mon) && grabc->col && !grabc->isfloating
+			&& !grabc->isfakefull) {
+		/* niri-style direct manipulation: drag reorders the strip and
+		 * right-drag resizes the column — the window never floats */
+		if (arg->ui == CurMove) {
+			cursor_mode = CurDragTile;
+			wlr_cursor_set_xcursor(cursor, cursor_mgr, "grabbing");
+		} else {
+			cursor_mode = CurResizeCol;
+			grab_startx = cursor->x;
+			grab_wfrac = grabc->col->wfrac;
+			wlr_cursor_set_xcursor(cursor, cursor_mgr, "ew-resize");
+		}
+		return;
+	}
+
 	/* Float the window and tell motionnotify to grab it */
 	setfloating(grabc, 1);
-	switch (cursor_mode = arg->ui) {
+	switch (cursor_mode = (arg->ui == CurDriftMove ? CurMove : arg->ui)) {
 	case CurMove:
 		grabcx = (int)round(cursor->x) - grabc->geom.x;
 		grabcy = (int)round(cursor->y) - grabc->geom.y;
@@ -3921,8 +5818,18 @@ pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 {
 	struct timespec now;
 
-	if (surface != seat->pointer_state.focused_surface &&
-			sloppyfocus && time && c && !client_is_unmanaged(c))
+	/* Following the pointer only on a change of pointer focus leaves the
+	 * keyboard stranded whenever focus was dropped without the cursor
+	 * moving off the window (a workspace switch onto an empty workspace, a
+	 * client that closed elsewhere, a launcher that took the keyboard and
+	 * went away): the window under the cursor is already the pointer focus,
+	 * so nothing hands it the keyboard back and typing goes nowhere.  When
+	 * nothing holds the keyboard at all, moving the mouse gives it to the
+	 * window under it.  Focus set from the keyboard is left alone. */
+	if (sloppyfocus && time && c && !client_is_unmanaged(c)
+			&& (surface != seat->pointer_state.focused_surface
+				|| (!exclusive_focus && !seat->drag
+					&& !seat->keyboard_state.focused_surface)))
 		focusclient(c, 0);
 
 	/* If surface is NULL, clear pointer focus */
@@ -3976,19 +5883,31 @@ rendermon(struct wl_listener *listener, void *data)
 	Client *c;
 	struct wlr_output_state pending = {0};
 	struct timespec now;
-	int animpending = 0, pointerrefresh = 0, skipframe = 0;
+	int animpending = 0, pointerrefresh = 0, skipframe = 0, relayout = 0;
+	int blockwait = 0;
 
 	/* Render if no XDG clients have an outstanding resize and are visible on
-	 * this monitor. */
+	 * this monitor.  A client that never acks must not hold the output
+	 * hostage: past RESIZEWAIT it is drawn at whatever size it has, or the
+	 * whole screen would stay frozen on the last frame — with an animation
+	 * caught halfway, windows parked off screen and nothing focusable. */
 	wl_list_for_each(c, &clients, link) {
-		if (c->resize && !c->isfloating && client_is_rendered_on_mon(c, m) && !client_is_stopped(c)) {
+		if (c->resize && !c->isfloating && client_is_rendered_on_mon(c, m)
+				&& !client_is_stopped(c)) {
+			uint32_t waited = now_ms() - c->resizeat;
+			if (waited >= RESIZEWAIT)
+				continue;
 			skipframe = 1;
-			break;
+			blockwait = MAX(blockwait, (int)(RESIZEWAIT - waited));
 		}
 	}
 
 	/* Animations advance only on frames that actually render, and only
 	 * schedule further frames while one is active. */
+	/* The overview clones the live buffers, so the camera zoom has to be on
+	 * them before anything is built from them this frame. */
+	driftapply(m);
+
 	if (animations || overview_visible) {
 		uint32_t t_now = now_ms();
 		float dt = m->lastanimtick && t_now > m->lastanimtick
@@ -4008,19 +5927,30 @@ rendermon(struct wl_listener *listener, void *data)
 				duration = c->anim.workspace
 						? MAX(180, animation_duration * 5 / 4)
 						: c->anim.fadein
-						? MAX(160, animation_duration * 3 / 4)
+						? MAX(60, animation_duration_open)
 						: animation_duration;
 				targetx = c->anim.workspace ? c->anim.to.x : c->geom.x;
 				targety = c->anim.workspace ? c->anim.to.y : c->geom.y;
 				c->anim.t += duration > 0 ? dt / (float)duration : 1.0f;
 				if (c->anim.t >= 1.0f) {
 					c->anim.active = 0;
+					if (c->anim.zoom) {
+						c->anim.zoom = 0;
+						clientunscale(c);
+					}
 					wlr_scene_node_set_position(&c->scene->node,
 							c->anim.hide ? c->geom.x : targetx,
 							c->anim.hide ? c->geom.y : targety);
 					if (c->anim.hide) {
-						wlr_scene_node_set_enabled(&c->scene->node, 0);
-						pointerrefresh = 1;
+						/* the workspace can have come back while this
+						 * ran: hiding it then would leave a window of
+						 * the current workspace invisible and unfocusable */
+						if (VISIBLEON(c, m)) {
+							relayout = 1;
+						} else {
+							wlr_scene_node_set_enabled(&c->scene->node, 0);
+							pointerrefresh = 1;
+						}
 					}
 					c->anim.workspace = 0;
 					c->anim.hide = 0;
@@ -4034,21 +5964,35 @@ rendermon(struct wl_listener *listener, void *data)
 				e = c->anim.workspace
 						? c->anim.t * c->anim.t * (3.0f - 2.0f * c->anim.t)
 						: c->anim.fadein
-						? 1.0f - powf(1.0f - c->anim.t, 3.0f)
+						? animease(animation_curve_open, c->anim.t)
 						: 1.0f - powf(2.0f, -10.0f * c->anim.t);
-				wlr_scene_node_set_position(&c->scene->node,
-						c->anim.from.x + (int)((float)(targetx - c->anim.from.x) * e),
-						c->anim.from.y + (int)((float)(targety - c->anim.from.y) * e));
-				if (c->anim.fadein && c->surfbuf) {
-					float opacity = c->anim.t * (2.0f - c->anim.t);
-					wlr_scene_buffer_set_opacity(c->surfbuf,
-							opacity * clientopacity(c));
+				if (c->anim.zoom) {
+					/* grow the whole frame out of its own centre */
+					float z = zoom_initial_ratio
+							+ (1.0f - zoom_initial_ratio) * e;
+					clientscale(c, z);
+					wlr_scene_node_set_position(&c->scene->node,
+							targetx + (int)roundf(c->geom.width
+									* (1.0f - z) / 2.0f),
+							targety + (int)roundf(c->geom.height
+									* (1.0f - z) / 2.0f));
+				} else {
+					wlr_scene_node_set_position(&c->scene->node,
+							c->anim.from.x + (int)((float)(targetx - c->anim.from.x) * e),
+							c->anim.from.y + (int)((float)(targety - c->anim.from.y) * e));
 				}
+				if (c->anim.fadein && c->surfbuf)
+					wlr_scene_buffer_set_opacity(c->surfbuf,
+							e * clientopacity(c));
 			}
 			if (!skipframe) {
 				animpending |= layeranimadvance(m, dt);
 				animpending |= closeanimadvance(m, dt);
 			}
+			/* a hide that finished on a window the current workspace owns
+			 * again: let arrange() settle visibility from the real state */
+			if (relayout)
+				arrange(m);
 		}
 		if (pointerrefresh)
 			motionnotify(0, NULL, 0, 0, 0, 0);
@@ -4071,9 +6015,12 @@ skip:
 	wlr_output_state_finish(&pending);
 	/* scheduling a frame without a commit fires immediately and would spin
 	 * the event loop; while a resize is pending the client's next commit
-	 * damages the scene and restarts the animation on its own */
+	 * damages the scene and restarts the animation on its own.  If it never
+	 * commits, the timer below brings the output back once the wait is up. */
 	if (animpending && !skipframe)
 		wlr_output_schedule_frame(m->wlr_output);
+	else if (skipframe && m->unblock)
+		wl_event_source_timer_update(m->unblock, MAX(1, blockwait));
 }
 
 void
@@ -4111,15 +6058,26 @@ resize(Client *c, struct wlr_box geo, int interact)
 	struct wlr_box *bbox;
 	struct wlr_box clip;
 	int oldx = c->geom.x, oldy = c->geom.y;
+	int drifted;
+	uint32_t serial;
 
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
 
 	bbox = interact ? &sgeom : &c->mon->w;
+	drifted = DRIFTLT(c->mon) && c->oncanvas && !c->isfloating && !interact
+			&& !c->isfullscreen && !c->isfakefull;
 
 	client_set_bounds(c, geo.width, geo.height);
 	c->geom = geo;
-	applybounds(c, bbox);
+	if ((SCROLLLT(c->mon) || drifted) && !c->isfloating && !interact) {
+		/* scroll columns and canvas windows legitimately extend past the
+		 * viewport, so only enforce the minimum size */
+		c->geom.width = MAX(1 + 2 * (int)c->bw, c->geom.width);
+		c->geom.height = MAX(1 + 2 * (int)c->bw, c->geom.height);
+	} else {
+		applybounds(c, bbox);
+	}
 
 	/* animate position changes of visible clients */
 	if (animations && !interact && !c->anim.fadein
@@ -4138,42 +6096,35 @@ resize(Client *c, struct wlr_box geo, int interact)
 	if (!c->anim.active)
 		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
-	if (c->border.top) {
-		int bw = (int)c->bw;
+	{
+		/* the open animation redraws these at its own size every frame */
 		int r = (c->isfullscreen || c->isfakefull) ? 0
 				: MIN(MAX(0, corner_radius), MIN(c->geom.width, c->geom.height) / 2);
-		int horizontal = MAX(0, c->geom.width - 2 * r);
-		int vertical = MAX(0, c->geom.height - 2 * r);
-
-		wlr_scene_rect_set_size(c->border.top, horizontal, bw);
-		wlr_scene_node_set_position(&c->border.top->node, r, 0);
-		wlr_scene_rect_set_size(c->border.bottom, horizontal, bw);
-		wlr_scene_node_set_position(&c->border.bottom->node, r,
-				MAX(0, c->geom.height - bw));
-		wlr_scene_rect_set_size(c->border.left, bw, vertical);
-		wlr_scene_node_set_position(&c->border.left->node, 0, r);
-		wlr_scene_rect_set_size(c->border.right, bw, vertical);
-		wlr_scene_node_set_position(&c->border.right->node,
-				MAX(0, c->geom.width - bw), r);
-
-		wlr_scene_rect_set_size(c->border.top_left, r, r);
-		wlr_scene_node_set_position(&c->border.top_left->node, 0, 0);
-		wlr_scene_rect_set_size(c->border.top_right, r, r);
-		wlr_scene_node_set_position(&c->border.top_right->node,
-				MAX(0, c->geom.width - r), 0);
-		wlr_scene_rect_set_size(c->border.bottom_right, r, r);
-		wlr_scene_node_set_position(&c->border.bottom_right->node,
-				MAX(0, c->geom.width - r), MAX(0, c->geom.height - r));
-		wlr_scene_rect_set_size(c->border.bottom_left, r, r);
-		wlr_scene_node_set_position(&c->border.bottom_left->node, 0,
-				MAX(0, c->geom.height - r));
+		clientborders(c, c->geom.width, c->geom.height, (int)c->bw, r);
 	}
 
 	/* this is a no-op if size hasn't changed */
-	c->resize = client_set_size(c, c->geom.width - 2 * c->bw,
-			c->geom.height - 2 * c->bw);
+	if (drifted) {
+		/* the client is sized in canvas pixels; the camera zoom is applied
+		 * to its buffers instead, so it never sees a resize */
+		serial = client_set_size(c,
+				MAX(1, c->canvas.width - 2 * (int)c->bw),
+				MAX(1, c->canvas.height - 2 * (int)c->bw));
+	} else {
+		serial = client_set_size(c, c->geom.width - 2 * c->bw,
+				c->geom.height - 2 * c->bw);
+	}
+	if (serial && serial != c->resize)
+		c->resizeat = now_ms();
+	c->resize = serial;
 	client_get_clip(c, &clip);
+	if (drifted) {
+		clip.width = MAX(1, c->canvas.width - (int)c->bw);
+		clip.height = MAX(1, c->canvas.height - (int)c->bw);
+	}
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	if (drifted && (driftz(c->mon, c->ws) != 1.0 || c->mon->driftscaled))
+		driftscaleclient(c, driftz(c->mon, c->ws));
 }
 
 void
@@ -4293,6 +6244,16 @@ setfloating(Client *c, int floating)
 	c->isfloating = floating;
 	if (!c->mon || !client_surface(c)->mapped)
 		return;
+	if (DRIFTLT(c->mon) && c->oncanvas && !floating && c->geom.width > 0) {
+		/* dropped back onto the canvas: keep it where the user left it */
+		double z = driftz(c->mon, c->ws);
+		int bw = 2 * (int)c->bw;
+		c->canvas.width = MAX(1 + bw, (int)round((c->geom.width - bw) / z) + bw);
+		c->canvas.height = MAX(1 + bw, (int)round((c->geom.height - bw) / z) + bw);
+		c->canvas.x = (int)round((c->geom.x - c->mon->w.x) / z + c->mon->camx[c->ws]);
+		c->canvas.y = (int)round((c->geom.y - c->mon->w.y) / z + c->mon->camy[c->ws]);
+		c->canvassized = 1;
+	}
 	wlr_scene_node_reparent(&c->scene->node, layers[c->isfullscreen ||
 			(p && p->isfullscreen) ? LyrFS
 			: c->isfloating ? LyrFloat : LyrTile]);
@@ -4333,7 +6294,7 @@ setmon(Client *c, Monitor *m, int ws)
 		return;
 	if (oldmon) {
 		animstop(oldmon);
-		bsp_detach(c);
+		detachclient(c);
 	}
 	if (c->ftl && oldmon)
 		wlr_foreign_toplevel_handle_v1_output_leave(c->ftl, oldmon->wlr_output);
@@ -4346,7 +6307,7 @@ setmon(Client *c, Monitor *m, int ws)
 	if (oldmon)
 		arrange(oldmon);
 	if (m) {
-		bsp_attach(m, (ws >= 0 && ws < NUMWS) ? (unsigned int)ws : m->ws, c);
+		attachclient(m, (ws >= 0 && ws < NUMWS) ? (unsigned int)ws : m->ws, c);
 		/* Make sure window actually overlaps with the monitor */
 		resize(c, c->geom, 0);
 		setfullscreen(c, c->isfullscreen); /* This will call arrange(c->mon) */
@@ -4401,6 +6362,39 @@ cfgcolor(const char *s, float out[4])
 	out[1] = ((v >> 16) & 0xff) / 255.0f;
 	out[2] = ((v >> 8) & 0xff) / 255.0f;
 	out[3] = (v & 0xff) / 255.0f;
+	return 1;
+}
+
+static int
+cfganimtype(const char *s)
+{
+	if (!strcmp(s, "zoom") || !strcmp(s, "pop"))
+		return AnimZoom;
+	if (!strcmp(s, "slide"))
+		return AnimSlide;
+	if (!strcmp(s, "fade"))
+		return AnimFade;
+	if (!strcmp(s, "none") || !strcmp(s, "false"))
+		return AnimNone;
+	wlr_log(WLR_ERROR, "config: unknown animation type '%s'", s);
+	return AnimZoom;
+}
+
+static int
+cfgcurve(const char *s, float out[4])
+{
+	/* x1,y1,x2,y2 — the x values are clamped, as CSS does, so the curve
+	 * stays a function of time; the y values may overshoot on purpose */
+	float c[4];
+
+	if (sscanf(s, "%f , %f , %f , %f", &c[0], &c[1], &c[2], &c[3]) != 4) {
+		wlr_log(WLR_ERROR, "config: bad curve '%s', want x1,y1,x2,y2", s);
+		return 0;
+	}
+	out[0] = MIN(1.0f, MAX(0.0f, c[0]));
+	out[1] = c[1];
+	out[2] = MIN(1.0f, MAX(0.0f, c[2]));
+	out[3] = c[3];
 	return 1;
 }
 
@@ -4460,6 +6454,20 @@ cfgaction(const char *act, void (**func)(const Arg *), Arg *arg)
 		{ "wm:swap_prev",             swapstack,            {.i = -1} },
 		{ "wm:swap_next",             swapstack,            {.i = +1} },
 		{ "wm:toggle_split",          togglesplit,          {0} },
+		{ "wm:toggle_layout",         togglelayout,         {0} },
+		{ "wm:layout:bsp",            setlayoutarg,         {.ui = LtBSP} },
+		{ "wm:layout:scroll",         setlayoutarg,         {.ui = LtScroll} },
+		{ "wm:layout:drift",          setlayoutarg,         {.ui = LtDrift} },
+		{ "wm:pan_left",              driftpankey,          {.i = DirLeft} },
+		{ "wm:pan_right",             driftpankey,          {.i = DirRight} },
+		{ "wm:pan_up",                driftpankey,          {.i = DirUp} },
+		{ "wm:pan_down",              driftpankey,          {.i = DirDown} },
+		{ "wm:zoom_in",               driftzoomkey,         {.f = 1.0f} },
+		{ "wm:zoom_out",              driftzoomkey,         {.f = -1.0f} },
+		{ "wm:zoom_reset",            driftzoomkey,         {.f = 0.0f} },
+		{ "wm:zoom_fit",              driftfit,             {0} },
+		{ "wm:consume",               consumewin,           {0} },
+		{ "wm:expel",                 expelwin,             {0} },
 		{ "wm:toggle_fullscreen",     togglefakefullscreen, {0} },
 		{ "wm:toggle_real_fullscreen",togglefullscreen,     {0} },
 		{ "wm:toggle_float",          togglefloating,       {0} },
@@ -4532,6 +6540,74 @@ cfgaddbind(Bind **arr, size_t *n, uint32_t mods, xkb_keysym_t sym,
 	(*arr)[i].arg = arg;
 }
 
+static const char *
+layoutname(unsigned int lt)
+{
+	return lt == LtScroll ? "scroll" : lt == LtDrift ? "drift" : "bsp";
+}
+
+int
+layoutstatepath(char *buf, size_t size)
+{
+	/* the layout the session was left in, kept out of the config file */
+	const char *env;
+
+	if ((env = getenv("XDG_STATE_HOME")) && *env)
+		snprintf(buf, size, "%s/gluewc", env);
+	else if ((env = getenv("HOME")) && *env)
+		snprintf(buf, size, "%s/.local/state/gluewc", env);
+	else
+		return 0;
+	return 1;
+}
+
+void
+loadlayoutstate(void)
+{
+	char path[512], name[32] = {0};
+	FILE *f;
+
+	if (!remember_layout || !layoutstatepath(path, sizeof path - 8))
+		return;
+	strncat(path, "/layout", sizeof path - strlen(path) - 1);
+	if (!(f = fopen(path, "r")))
+		return;
+	if (fscanf(f, "%31s", name) == 1) {
+		if (!strcmp(name, "scroll"))
+			default_layout = LtScroll;
+		else if (!strcmp(name, "drift"))
+			default_layout = LtDrift;
+		else if (!strcmp(name, "bsp"))
+			default_layout = LtBSP;
+	}
+	fclose(f);
+}
+
+void
+savelayoutstate(unsigned int lt)
+{
+	char path[600], dir[512];
+	FILE *f;
+
+	if (!remember_layout || !layoutstatepath(dir, sizeof dir))
+		return;
+	/* the parent of the state dir usually exists already; create both anyway */
+	{
+		char *slash = strrchr(dir, '/');
+		if (slash) {
+			*slash = '\0';
+			mkdir(dir, 0700);
+			*slash = '/';
+		}
+	}
+	mkdir(dir, 0700);
+	snprintf(path, sizeof path, "%s/layout", dir);
+	if (!(f = fopen(path, "w")))
+		return;
+	fprintf(f, "%s\n", layoutname(lt));
+	fclose(f);
+}
+
 void
 readconfig(void)
 {
@@ -4554,8 +6630,10 @@ readconfig(void)
 		snprintf(path, sizeof path, "%s/.config/gluewc/config.conf", env);
 	else
 		return;
-	if (!(f = fopen(path, "r")))
+	if (!(f = fopen(path, "r"))) {
+		loadlayoutstate();
 		return;
+	}
 
 	while (getline(&line, &lsz, f) != -1) {
 		k = cfgtrim(line);
@@ -4584,6 +6662,23 @@ readconfig(void)
 				cfgaddbind(&runkeys, &nrunkeys, mods, sym, func, arg);
 			else
 				cfgaddbind(&runnormalkeys, &nrunnormalkeys, mods, sym, func, arg);
+		} else if (!strcmp(k, "remember_layout")) {
+			remember_layout = !strcmp(v, "true") || !strcmp(v, "1");
+		} else if (!strcmp(k, "layout")) {
+			default_layout = !strcmp(v, "scroll") ? LtScroll
+					: !strcmp(v, "drift") ? LtDrift : LtBSP;
+		} else if (!strcmp(k, "drift_snap")) {
+			drift_snap = MAX(0, atoi(v));
+		} else if (!strcmp(k, "drift_nudge")) {
+			drift_nudge = MAX(1, atoi(v));
+		} else if (!strcmp(k, "drift_zoom_min")) {
+			drift_zoom_min = MAX(0.05f, strtof(v, NULL));
+		} else if (!strcmp(k, "drift_zoom_max")) {
+			drift_zoom_max = MAX(1.0f, strtof(v, NULL));
+		} else if (!strcmp(k, "drift_zoom_step")) {
+			drift_zoom_step = MAX(1.01f, strtof(v, NULL));
+		} else if (!strcmp(k, "drift_pan_speed")) {
+			drift_pan_speed = MAX(0.1f, strtof(v, NULL));
 		} else if (!strcmp(k, "gap")) {
 			gappx = atoi(v);
 		} else if (!strcmp(k, "border")) {
@@ -4618,6 +6713,22 @@ readconfig(void)
 			animations = !strcmp(v, "true") || !strcmp(v, "1");
 		} else if (!strcmp(k, "animation_duration")) {
 			animation_duration = atoi(v);
+		} else if (!strcmp(k, "animation_type_open")) {
+			animation_type_open = cfganimtype(v);
+		} else if (!strcmp(k, "animation_type_close")) {
+			animation_type_close = cfganimtype(v);
+		} else if (!strcmp(k, "animation_duration_open")) {
+			animation_duration_open = atoi(v);
+		} else if (!strcmp(k, "animation_duration_close")) {
+			animation_duration_close = atoi(v);
+		} else if (!strcmp(k, "animation_curve_open")) {
+			cfgcurve(v, animation_curve_open);
+		} else if (!strcmp(k, "animation_curve_close")) {
+			cfgcurve(v, animation_curve_close);
+		} else if (!strcmp(k, "zoom_initial_ratio")) {
+			zoom_initial_ratio = MIN(1.0f, MAX(0.05f, strtof(v, NULL)));
+		} else if (!strcmp(k, "zoom_end_ratio")) {
+			zoom_end_ratio = MIN(1.0f, MAX(0.05f, strtof(v, NULL)));
 		} else if (!strcmp(k, "repeat_rate")) {
 			repeat_rate = atoi(v);
 		} else if (!strcmp(k, "repeat_delay")) {
@@ -4641,6 +6752,8 @@ readconfig(void)
 	}
 	free(line);
 	fclose(f);
+	/* the layout the last session ended in wins over the configured one */
+	loadlayoutstate();
 }
 
 void
@@ -4664,6 +6777,7 @@ setup(void)
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
+	overview_watchdog = wl_event_loop_add_timer(event_loop, overviewwatchdog, NULL);
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
@@ -4827,6 +6941,9 @@ setup(void)
 	wl_signal_add(&cursor->events.swipe_begin, &cursor_swipe_begin);
 	wl_signal_add(&cursor->events.swipe_update, &cursor_swipe_update);
 	wl_signal_add(&cursor->events.swipe_end, &cursor_swipe_end);
+	wl_signal_add(&cursor->events.pinch_begin, &cursor_pinch_begin);
+	wl_signal_add(&cursor->events.pinch_update, &cursor_pinch_update);
+	wl_signal_add(&cursor->events.pinch_end, &cursor_pinch_end);
 
 	cursor_shape_mgr = wlr_cursor_shape_manager_v1_create(dpy, 1);
 	wl_signal_add(&cursor_shape_mgr->events.request_set_shape, &request_set_cursor_shape);
@@ -4957,7 +7074,19 @@ void
 setratio(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
-	if (!sel || !sel->node || !sel->node->par)
+	if (!sel)
+		return;
+	if (sel->col) {
+		/* resize the column, like niri's set-column-width +/- */
+		sel->col->wfrac += arg->f;
+		if (sel->col->wfrac < 0.15f)
+			sel->col->wfrac = 0.15f;
+		if (sel->col->wfrac > 1.0f)
+			sel->col->wfrac = 1.0f;
+		arrange(selmon);
+		return;
+	}
+	if (!sel->node || !sel->node->par)
 		return;
 	sel->node->par->ratio += arg->f;
 	if (sel->node->par->ratio < 0.1f)
@@ -4983,7 +7112,18 @@ void
 swapdir(const Arg *arg)
 {
 	Client *sel = focustop(selmon), *t;
-	if (!sel || sel->isfloating || sel->isfullscreen || sel->isfakefull || !sel->node)
+	if (!sel || sel->isfloating || sel->isfullscreen || sel->isfakefull)
+		return;
+	if (sel->oncanvas) {
+		/* nothing to swap on a canvas: move the window instead */
+		driftnudge(arg);
+		return;
+	}
+	if (sel->col) {
+		scroll_swap(sel, arg->i);
+		return;
+	}
+	if (!sel->node)
 		return;
 	if (!(t = dirpick(selmon, sel, arg->i)) || !t->node)
 		return;
@@ -4996,7 +7136,13 @@ swapstack(const Arg *arg)
 	/* swap with the next (+1) or previous (-1) leaf in tree order */
 	Client *sel = focustop(selmon);
 	Node *n;
-	if (!sel || sel->isfullscreen || sel->isfakefull || !sel->node || !selmon)
+	if (!sel || sel->isfullscreen || sel->isfakefull || !selmon)
+		return;
+	if (sel->col) {
+		scroll_swap(sel, arg->i > 0 ? DirRight : DirLeft);
+		return;
+	}
+	if (!sel->node)
 		return;
 	n = arg->i > 0 ? bsp_nextleaf(selmon->tree[sel->ws], sel->node)
 			: bsp_prevleaf(selmon->tree[sel->ws], sel->node);
@@ -5011,7 +7157,7 @@ toggledecor(const Arg *arg)
 	Monitor *m;
 	decorhidden ^= 1;
 	wl_list_for_each(c, &clients, link) {
-		if (!c->isfullscreen)
+		if (!c->isfullscreen && !c->isfakefull)
 			c->bw = decorhidden ? 0 : borderpx;
 		applyeffects(c);
 		if (c->isfloating)
@@ -5022,6 +7168,20 @@ toggledecor(const Arg *arg)
 }
 
 void
+applyfakefull(Client *c)
+{
+	/* scroll layout: fake fullscreen covers the whole output (above bars),
+	 * so its scene node has to move between the tile and fullscreen layers */
+	if (!c->mon || c->isfullscreen)
+		return;
+	c->bw = (c->isfakefull || decorhidden) ? 0 : borderpx;
+	if (c->isfloating || !client_surface(c)->mapped)
+		return;
+	wlr_scene_node_reparent(&c->scene->node,
+			layers[c->isfakefull && SCROLLLT(c->mon) ? LyrFS : LyrTile]);
+}
+
+void
 togglefakefullscreen(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
@@ -5029,6 +7189,13 @@ togglefakefullscreen(const Arg *arg)
 		return;
 	if (sel->isfullscreen)
 		setfullscreen(sel, 0);
+	if (SCROLLLT(selmon) && sel->col && !sel->isfloating
+			&& !sel->isfakefull) {
+		/* scroll layout: no fullscreen — just make the column as wide as
+		 * the screen and back, like a right-drag resize to full width */
+		scroll_maximize(sel);
+		return;
+	}
 	sel->isfakefull ^= 1;
 	applyeffects(sel);
 	if (sel->isfakefull) {
@@ -5038,6 +7205,7 @@ togglefakefullscreen(const Arg *arg)
 	} else if (sel->isfloating) {
 		resize(sel, sel->prev, 0);
 	}
+	applyfakefull(sel);
 	arrange(selmon);
 }
 
@@ -5075,7 +7243,13 @@ void
 togglesplit(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
-	if (!sel || !sel->node || !sel->node->par)
+	if (!sel)
+		return;
+	if (sel->col) {
+		scroll_maximize(sel);
+		return;
+	}
+	if (!sel->node || !sel->node->par)
 		return;
 	sel->node->par->horiz ^= 1;
 	arrange(selmon);
@@ -5096,17 +7270,24 @@ viewws(const Arg *arg)
 	backward = (oldws + NUMWS - arg->ui) % NUMWS;
 	dir = forward <= backward ? 1 : -1;
 	animate = animations && animation_duration > 0 && !overview_visible;
+	/* always settle whatever was still moving: an animation left running
+	 * across a switch finishes against the new workspace and takes windows
+	 * that belong to it off screen */
+	animstop(selmon);
+	arrange(selmon);
 	if (animate) {
-		animstop(selmon);
-		arrange(selmon);
 		wl_list_for_each(c, &clients, link) {
 			if (c->mon != selmon || c->ws != oldws
 					|| !c->scene->node.enabled || client_is_unmanaged(c))
 				continue;
 			c->anim.from.x = c->scene->node.x;
 			c->anim.from.y = c->scene->node.y;
-			c->anim.to.x = c->geom.x - dir * selmon->m.width;
-			c->anim.to.y = c->geom.y;
+			/* workspaces slide horizontally in BSP, vertically (like
+			 * niri, one after another) in the scroll layout */
+			c->anim.to.x = c->geom.x
+					- (SCROLLLT(selmon) ? 0 : dir * selmon->m.width);
+			c->anim.to.y = c->geom.y
+					- (SCROLLLT(selmon) ? dir * selmon->m.height : 0);
 			c->anim.fadein = 0;
 			c->anim.workspace = 1;
 			c->anim.hide = 1;
@@ -5124,8 +7305,10 @@ viewws(const Arg *arg)
 			if (c->mon != selmon || !VISIBLEON(c, selmon)
 					|| !c->scene->node.enabled || client_is_unmanaged(c))
 				continue;
-			c->anim.from.x = c->geom.x + dir * selmon->m.width;
-			c->anim.from.y = c->geom.y;
+			c->anim.from.x = c->geom.x
+					+ (SCROLLLT(selmon) ? 0 : dir * selmon->m.width);
+			c->anim.from.y = c->geom.y
+					+ (SCROLLLT(selmon) ? dir * selmon->m.height : 0);
 			c->anim.to.x = c->geom.x;
 			c->anim.to.y = c->geom.y;
 			c->anim.fadein = 0;
@@ -5145,10 +7328,11 @@ void
 movetows(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
-	if (!sel || !selmon || sel->ws == arg->ui || !sel->node)
+	if (!sel || !selmon || sel->ws == arg->ui
+			|| (!sel->node && !sel->col && !sel->oncanvas))
 		return;
-	bsp_detach(sel);
-	bsp_attach(selmon, arg->ui, sel);
+	detachclient(sel);
+	attachclient(selmon, arg->ui, sel);
 	focusclient(focustop(selmon), 1);
 	arrange(selmon);
 }
@@ -5157,10 +7341,11 @@ void
 movetowsfollow(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
-	if (!sel || !selmon || sel->ws == arg->ui || !sel->node)
+	if (!sel || !selmon || sel->ws == arg->ui
+			|| (!sel->node && !sel->col && !sel->oncanvas))
 		return;
-	bsp_detach(sel);
-	bsp_attach(selmon, arg->ui, sel);
+	detachclient(sel);
+	attachclient(selmon, arg->ui, sel);
 	viewws(arg);
 }
 

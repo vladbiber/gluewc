@@ -16,8 +16,14 @@ It is a fork of [dwl 0.8](https://codeberg.org/dwl/dwl), using
 
 - Automatic BSP tiling with per-split direction and ratio control
 - Nine independent workspaces on every monitor
-- Animated window open, close, retile and workspace transitions
+- Animated window open, close, retile and workspace transitions, with
+  configurable type, duration and cubic-bezier easing
 - GNOME-style overview with neighboring workspaces and live wallpaper layers
+- Niri-style scrolling layout per monitor (Mod-N): columns on an endless strip,
+  vertical workspace slides and a vertical overview over the wallpaper
+- driftwm-style drift layout (Mod-N again): windows keep their native size on
+  an infinite canvas with edge snapping, per-workspace camera pan and zoom,
+  and trackpad gestures for both
 - Drag windows between workspaces directly from the overview
 - Three-finger workspace and overview gestures
 - Directional keyboard focus; crossing the left or right edge changes workspace
@@ -90,7 +96,12 @@ Edit it and press `Super+Shift+R` to reload.
 | `Super+1` … `Super+9` | Change workspace |
 | `Super+Ctrl+1` … `Super+Ctrl+9` | Move window and follow |
 | `Super+Arrow` or `Super+H/J/K/L` | Directional focus |
-| `Super+Shift+Arrow` | Swap windows |
+| `Super+Shift+Arrow` | Swap windows (nudge them in the drift layout) |
+| `Super+N` | Cycle BSP, scroll and drift layouts |
+| `Super+Ctrl+Arrow` | Pan the drift canvas |
+| `Super+Shift+drag` | Drag the drift canvas around with the mouse |
+| `Super+W`, `Super+±`, `Super+0` | Drift: fit, zoom, 1:1 |
+| `Super+wheel` / `Super+Shift+wheel` | Change workspace / zoom the drift camera |
 | `Super+F` | Workspace-area fullscreen |
 | `Super+Shift+F` | Real fullscreen |
 | `Super+V` | Toggle centered floating |
@@ -98,13 +109,15 @@ Edit it and press `Super+Shift+R` to reload.
 | `Super+O` | Toggle configured transparency |
 | `Super+Escape` | Enter normal mode; `I` returns to insert mode |
 | `Super+Shift+R` | Reload config in place |
-| `Super+Shift+Q` | Quit gluewc |
+| `Super+M` or `Super+Shift+Q` | Quit gluewc |
 
 In the overview, use arrows, workspace numbers, the mouse wheel or a two-finger
 horizontal swipe to navigate. Click a window to focus it, or drag it onto the
 left, center or right workspace. A three-finger horizontal swipe changes the
 workspace from the desktop; a three-finger vertical swipe opens or closes the
-overview. `Super+wheel` also changes workspace.
+overview. `Super+wheel` also changes workspace. In the drift layout three
+fingers pan the canvas and a pinch zooms it, so four fingers take over
+workspaces and the overview there.
 
 ## Desktop components
 

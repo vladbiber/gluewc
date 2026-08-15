@@ -84,6 +84,31 @@ Toggle fullscreen inside the panel-reserved usable area.
 Toggle real output fullscreen.
 .It Mod-V
 Toggle centered floating.
+.It Mod-N
+Cycle the layout of the focused monitor: BSP, the niri-style scrolling
+layout, then the driftwm-style drift canvas.
+In the scrolling layout workspaces sit one above the other and new windows
+open in their own column beside the focused one.
+In the drift layout every workspace is an infinite canvas with its own
+camera: windows keep the size they asked for, edges snap while dragging,
+Mod-Ctrl-arrow pans, Mod-W fits the canvas on screen, Mod-plus, Mod-minus,
+Mod-0 and Mod-Shift-wheel zoom, three fingers pan and a pinch zooms, and
+four-finger swipes take over workspaces and the overview.
+The layout is remembered across sessions unless
+.Ic remember_layout
+is disabled.
+.It Mod-wheel
+Change workspace, in every layout.
+The overview marks the focused window only in the scrolling layout.
+.It Mod-Comma , Mod-Period
+Scrolling layout: consume the next column's window into the focused column,
+or expel the focused window into its own column.
+In the scrolling layout Mod-drag reorders the strip without floating the
+window, Mod-right-drag resizes the column, moving focus away from a
+fullscreen window restores it, three-finger vertical swipes change workspace
+and horizontal swipes walk the windows.
+Mod-F makes the column as wide as the screen and a second press restores the
+previous width, and the overview marks the focused window with a focus ring.
 .It Mod-B
 Toggle window borders and gaps.
 .It Mod-O
@@ -94,7 +119,7 @@ Close the focused window.
 Enter normal mode.
 .It Mod-Shift-R
 Reload runtime configuration.
-.It Mod-Shift-Q
+.It Mod-M , Mod-Shift-Q
 Quit.
 .El
 .Ss Normal mode
@@ -107,6 +132,11 @@ focused split ratio, H/L swap in tree order, and s toggles split direction.
 .Bl -tag -width 20n -compact
 .It Mod-Button1
 Move the focused window; tiled windows become floating.
+.It Mod-Shift-Button1
+Drift layout only: drag the canvas itself, panning the camera with the
+cursor.
+In the other layouts there is no camera and the click goes to the
+application.
 .It Mod-Button2
 Toggle floating.
 .It Mod-Button3

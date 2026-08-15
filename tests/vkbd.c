@@ -28,7 +28,9 @@ struct keymapent { const char *name; int code; };
 static const struct keymapent keys[] = {
 	{"1",2},{"2",3},{"3",4},{"4",5},{"5",6},{"6",7},{"7",8},{"8",9},{"9",10},
 	{"q",16},{"t",20},{"g",34},{"i",23},{"s",31},{"f",33},{"h",35},{"j",36},{"k",37},{"l",38},
-	{"c",46},{"v",47},{"b",48},{"r",19},{"o",24},
+	{"c",46},{"v",47},{"b",48},{"r",19},{"o",24},{"m",50},{"n",49},{"w",17},
+	{"0",11},{"minus",12},{"equal",13},
+	{"comma",51},{"period",52},
 	{"Return",28},{"Escape",1},{"Tab",15},
 	{"Super",125},
 	{"Left",105},{"Right",106},{"Up",103},{"Down",108},
@@ -78,6 +80,40 @@ int main(int argc, char *argv[])
 		char buf[64];
 		char *tok, *save = NULL, *last = NULL;
 		int mods[4], nmods = 0, code, m;
+		/* hold/release Super across other commands, and timed waits, so a
+		 * concurrent vptr run can drag with the modifier held */
+		if (!strcmp(argv[i], "MS-down")) {
+			/* Super and Shift held together, for wheel and drag tests */
+			zwp_virtual_keyboard_v1_key(kb, t++, 125, WL_KEYBOARD_KEY_STATE_PRESSED);
+			zwp_virtual_keyboard_v1_key(kb, t++, 42, WL_KEYBOARD_KEY_STATE_PRESSED);
+			zwp_virtual_keyboard_v1_modifiers(kb, 64 | 1, 0, 0, 0);
+			wl_display_roundtrip(dpy);
+			continue;
+		}
+		if (!strcmp(argv[i], "MS-up")) {
+			zwp_virtual_keyboard_v1_key(kb, t++, 42, WL_KEYBOARD_KEY_STATE_RELEASED);
+			zwp_virtual_keyboard_v1_key(kb, t++, 125, WL_KEYBOARD_KEY_STATE_RELEASED);
+			zwp_virtual_keyboard_v1_modifiers(kb, 0, 0, 0, 0);
+			wl_display_roundtrip(dpy);
+			continue;
+		}
+		if (!strcmp(argv[i], "M-down")) {
+			zwp_virtual_keyboard_v1_key(kb, t++, 125, WL_KEYBOARD_KEY_STATE_PRESSED);
+			zwp_virtual_keyboard_v1_modifiers(kb, 64, 0, 0, 0);
+			wl_display_roundtrip(dpy);
+			continue;
+		}
+		if (!strcmp(argv[i], "M-up")) {
+			zwp_virtual_keyboard_v1_key(kb, t++, 125, WL_KEYBOARD_KEY_STATE_RELEASED);
+			zwp_virtual_keyboard_v1_modifiers(kb, 0, 0, 0, 0);
+			wl_display_roundtrip(dpy);
+			continue;
+		}
+		if (!strncmp(argv[i], "sleep", 5)) {
+			wl_display_roundtrip(dpy);
+			usleep(atoi(argv[i] + 5) * 1000);
+			continue;
+		}
 		snprintf(buf, sizeof buf, "%s", argv[i]);
 		for (tok = strtok_r(buf, "+", &save); tok; tok = strtok_r(NULL, "+", &save)) {
 			if (last) {
