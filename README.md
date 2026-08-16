@@ -12,12 +12,10 @@ It is a fork of [dwl 0.8](https://codeberg.org/dwl/dwl), using
 [wlroots 0.19](https://gitlab.freedesktop.org/wlroots/wlroots) and
 [SceneFX 0.4](https://github.com/wlrfx/scenefx/releases/tag/0.4.1).
 
-<video src="https://raw.githubusercontent.com/vladbiber/gluewc/main/docs/media/glue-demo.mp4" controls muted loop playsinline width="720">
-  <a href="https://raw.githubusercontent.com/vladbiber/gluewc/main/docs/media/glue-demo.mp4">Watch the demo</a>
-</video>
+[![gluewc in use](docs/media/glue-poster.jpg)](https://github.com/vladbiber/gluewc/blob/main/docs/media/glue-demo.mp4)
 
-The clip runs through the layouts, the overview, the gestures and the shell in
-[the video above](docs/media/glue-demo.mp4).
+Click for a minute and a half of it in use: the layouts, the overview, the
+gestures and the shell.
 
 ## Highlights
 
