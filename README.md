@@ -12,10 +12,22 @@ It is a fork of [dwl 0.8](https://codeberg.org/dwl/dwl), using
 [wlroots 0.19](https://gitlab.freedesktop.org/wlroots/wlroots) and
 [SceneFX 0.4](https://github.com/wlrfx/scenefx/releases/tag/0.4.1).
 
-[![gluewc in use](docs/media/glue-poster.jpg)](https://github.com/vladbiber/gluewc/blob/main/docs/media/glue-demo.mp4)
+![The overview opening, then the scroll and drift layouts](docs/media/glue-tour.webp)
 
-Click for a minute and a half of it in use: the layouts, the overview, the
-gestures and the shell.
+*The overview, then a cycle through the scroll and drift layouts.*
+
+![BSP tiling with three windows and the bar](docs/media/bsp-tiling.png)
+
+*Automatic BSP tiling. The bar is [glueqs](https://github.com/vladbiber/glueqs).*
+
+![The overview, with the neighbouring workspaces either side](docs/media/overview.png)
+
+*The overview: the workspace scaled down with its neighbours either side, and
+the shell's dash along the bottom.*
+
+There is a longer clip in
+[docs/media/glue-demo.mp4](https://github.com/vladbiber/gluewc/raw/main/docs/media/glue-demo.mp4);
+GitHub hands mp4 files over as downloads instead of playing them in the page.
 
 ## Highlights
 
