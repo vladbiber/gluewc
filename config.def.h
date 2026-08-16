@@ -260,10 +260,9 @@ static const Key normalkeys[] = {
 	{ 0, XKB_KEY_L,     swapstack,   {.i = +1} },
 	{ 0, XKB_KEY_s,     togglesplit, {0} },
 	/* the function row without Mod, since normal mode already owns the
-	 * keyboard; the same order as the Mod bindings in insert mode */
-	{ 0, XKB_KEY_F1,    spawn, SHCMD("playerctl play-pause") },
-	{ 0, XKB_KEY_F2,    spawn, SHCMD("playerctl previous") },
-	{ 0, XKB_KEY_F3,    spawn, SHCMD("playerctl next") },
+	 * keyboard. F1..F3 are the exception: the player keys stay on Mod
+	 * everywhere, and keys[] is matched first, so Mod+F1..F3 reach them
+	 * here too. */
 	{ 0, XKB_KEY_F4,    spawn, VOLMUTE },
 	{ 0, XKB_KEY_F5,    spawn, VOLDOWN },
 	{ 0, XKB_KEY_F6,    spawn, VOLUP },

@@ -98,7 +98,9 @@ enum { CurNormal, CurPressed, CurMove, CurResize,
        CurDriftPan, CurBSPMove, CurBSPResize }; /* cursor */
 enum { LtBSP, LtScroll, LtDrift, LtLast }; /* per-monitor layouts */
 enum { XDGShell, LayerShell, X11 }; /* client types */
-enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS }; /* scene layers */
+/* LyrOverview sits above the windows but below LyrTop, so the bar stays
+ * visible over the overview while a fullscreen client (LyrFS) still covers it */
+enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrOverview, LyrTop, LyrFS, LyrOverlay, LyrBlock, NUM_LAYERS }; /* scene layers */
 enum { ModeInsert, ModeNormal }; /* input modes */
 enum { DirLeft, DirRight, DirUp, DirDown }; /* focus/swap directions */
 enum { AnimNone, AnimFade, AnimSlide, AnimZoom }; /* open/close animation */
@@ -488,6 +490,9 @@ static void overviewnavigate(unsigned int ws, int dir);
 static void overviewrelayout(void);
 static void overviewfinish(void);
 static void overviewset(int active);
+static int overviewpassthrough(void);
+static int overviewkeypassthrough(void);
+static void saveoverviewstate(int active);
 static void overviewtoggle(const Arg *arg);
 static int overviewvalid(Monitor *m);
 static void workspacestep(int dir);
@@ -1317,6 +1322,17 @@ arrangelayers(Monitor *m)
 			return;
 		}
 	}
+
+	/* Nothing above the shell wants the keyboard any more. Without this the
+	 * grab would stick after e.g. the overview dock closes its search box,
+	 * and every later key would go to a surface that stopped asking for it. */
+	if (exclusive_focus) {
+		exclusive_focus = NULL;
+		if (overview_visible)
+			wlr_seat_keyboard_notify_clear_focus(seat);
+		else
+			focusclient(focustop(m), 1);
+	}
 }
 
 void
@@ -1371,7 +1387,9 @@ axisnotify(struct wl_listener *listener, void *data)
 			workspacestep(dir);
 		return;
 	}
-	if (overview_visible) {
+	/* over the shell's own surfaces the wheel belongs to them - the overview
+	 * dock scrolls its app grid with it - so only steal it elsewhere */
+	if (overview_visible && !overviewpassthrough()) {
 		if (!overview_active)
 			return;
 		if (event->source == WL_POINTER_AXIS_SOURCE_WHEEL
@@ -3080,7 +3098,10 @@ buttonpress(struct wl_listener *listener, void *data)
 	if (super_group && super_group->super_down
 			&& event->state == WL_POINTER_BUTTON_STATE_PRESSED)
 		super_group->super_alone = 0;
-	if (overview_visible || overview_button_swallow) {
+	/* a fresh press over the shell's dock belongs to the dock, not the
+	 * overview; once a gesture is under way the overview keeps it */
+	if ((overview_visible || overview_button_swallow)
+			&& !(!overview_button_swallow && overviewpassthrough())) {
 		overviewbutton(event);
 		return;
 	}
@@ -4214,6 +4235,9 @@ ftlactivatenotify(struct wl_listener *listener, void *data)
 	Arg a;
 	if (!c->mon)
 		return;
+	/* the overview hides every window, so a dock click there would focus
+	 * something the user cannot see: step out of it first */
+	overviewset(0);
 	selmon = c->mon;
 	a.ui = c->ws;
 	viewws(&a);
@@ -5090,6 +5114,39 @@ overviewbutton(struct wlr_pointer_button_event *event)
 }
 
 static int
+overviewpassthrough(void)
+{
+	/* The shell puts its overview dock on a layer surface. While the pointer
+	 * is over one, the overview stops swallowing input so the dock can be
+	 * hovered and clicked; everywhere else the overview keeps the pointer. */
+	struct wlr_surface *surface = NULL;
+	LayerSurface *l = NULL;
+	Client *c = NULL;
+
+	if (!overview_visible || overview_drag_client)
+		return 0;
+	/* xytonode's own pl output walks one node too far up and comes back
+	 * empty, so resolve the toplevel from the surface instead */
+	xytonode(cursor->x, cursor->y, &surface, NULL, NULL, NULL, NULL);
+	return surface && toplevel_from_wlr_surface(surface, &c, &l) == LayerShell;
+}
+
+static int
+overviewkeypassthrough(void)
+{
+	/* A layer surface holds the keyboard - the overview dock's search box
+	 * asking for it - so the keys are its to consume, not the overview's. */
+	struct wlr_surface *focus;
+	LayerSurface *l = NULL;
+	Client *c = NULL;
+
+	if (!overview_visible)
+		return 0;
+	focus = seat->keyboard_state.focused_surface;
+	return focus && toplevel_from_wlr_surface(focus, &c, &l) == LayerShell;
+}
+
+static int
 overviewmotion(void)
 {
 	Monitor *m;
@@ -5136,6 +5193,7 @@ overviewset(int active)
 	if (active == overview_active || (active && (locked || !selmon)))
 		return;
 	overview_active = active;
+	saveoverviewstate(active);
 	overview_swipe_active = overview_swipe_triggered = 0;
 	overview_swipe_dx = overview_swipe_dy = 0.0;
 	if (active) {
@@ -5444,14 +5502,15 @@ keypress(struct wl_listener *listener, void *data)
 
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
-	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED && !super) {
+	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED && !super
+			&& !overviewkeypassthrough()) {
 		if (overview_visible)
 			group->overview_keycode = event->keycode;
 		for (i = 0; i < nsyms; i++)
 			handled = (overview_visible ? (overview_active ? overviewkey(syms[i]) : 1)
 					: keybinding(mods, syms[i])) || handled;
 	}
-	if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED
+	if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED && !overviewkeypassthrough()
 			&& (overview_visible || event->keycode == group->overview_keycode)) {
 		handled = 1;
 		if (event->keycode == group->overview_keycode)
@@ -5780,7 +5839,7 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 		if (sloppyfocus)
 			selmon = xytomon(cursor->x, cursor->y);
 	}
-	if (overviewmotion())
+	if (!overviewpassthrough() && overviewmotion())
 		return;
 
 	/* Update drag icon's position */
@@ -6985,6 +7044,32 @@ savelayoutstate(unsigned int lt)
 }
 
 void
+saveoverviewstate(int active)
+{
+	/* published so the shell can put a dock on screen while the overview is
+	 * up; no other compositor writes this, so the dock stays gluewc-only */
+	char path[600], dir[512];
+	FILE *f;
+
+	if (!layoutstatepath(dir, sizeof dir))
+		return;
+	{
+		char *slash = strrchr(dir, '/');
+		if (slash) {
+			*slash = '\0';
+			mkdir(dir, 0700);
+			*slash = '/';
+		}
+	}
+	mkdir(dir, 0700);
+	snprintf(path, sizeof path, "%s/overview", dir);
+	if (!(f = fopen(path, "w")))
+		return;
+	fprintf(f, "%d\n", active ? 1 : 0);
+	fclose(f);
+}
+
+void
 readconfig(void)
 {
 	char path[512], *line = NULL, *k, *v, *v2;
@@ -7188,7 +7273,10 @@ setup(void)
 	wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
 	overview_dim_scene = wlr_scene_tree_create(layers[LyrBottom]);
 	wlr_scene_node_set_enabled(&overview_dim_scene->node, 0);
-	overview_scene = wlr_scene_tree_create(layers[LyrOverlay]);
+	/* clear any state left behind by a session that died with the overview
+	 * open, so the shell does not start up with its dock on screen */
+	saveoverviewstate(0);
+	overview_scene = wlr_scene_tree_create(layers[LyrOverview]);
 	overview_panels_scene = wlr_scene_tree_create(overview_scene);
 	overview_drag_scene = wlr_scene_tree_create(overview_scene);
 	wlr_scene_node_set_enabled(&overview_scene->node, 0);
