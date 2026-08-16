@@ -3,3 +3,4 @@
 *.h text eol=lf
 *.md text eol=lf
 *.sh text eol=lf
+*.mp4 binary

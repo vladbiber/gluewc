@@ -12,6 +12,13 @@ It is a fork of [dwl 0.8](https://codeberg.org/dwl/dwl), using
 [wlroots 0.19](https://gitlab.freedesktop.org/wlroots/wlroots) and
 [SceneFX 0.4](https://github.com/wlrfx/scenefx/releases/tag/0.4.1).
 
+<video src="https://raw.githubusercontent.com/vladbiber/gluewc/main/docs/media/glue-demo.mp4" controls muted loop playsinline width="720">
+  <a href="https://raw.githubusercontent.com/vladbiber/gluewc/main/docs/media/glue-demo.mp4">Watch the demo</a>
+</video>
+
+The clip runs through the layouts, the overview, the gestures and the shell in
+[the video above](docs/media/glue-demo.mp4).
+
 ## Highlights
 
 - Automatic BSP tiling with per-split direction and ratio control
@@ -195,6 +202,20 @@ Use either wallpaper command, not both. With neither, `root_color = 000000`
 keeps the background black. Waybar can use its `dwl` workspaces module; desktop
 shells can also consume the foreign-toplevel protocol.
 
+### glueqs
+
+[glueqs](https://github.com/vladbiber/glueqs) is a Quickshell desktop shell
+written alongside gluewc: a dot-matrix bar with workspaces off the dwl IPC,
+tray, media, network, weather and notifications, plus OSDs, a launcher and a
+dash that appears over the overview. It is the shell in the video above.
+
+It is entirely optional — gluewc runs with waybar, any other layer-shell bar,
+or none at all — but it is the combination the compositor is developed against:
+
+```ini
+autostart = qs -c glueqs
+```
+
 ## Configuration and building
 
 - [Installation and distro notes](docs/INSTALL.md)
@@ -217,4 +238,3 @@ config. Run `man gluewc` for command-line and environment details.
 gluewc is GPL-3.0-or-later. It is derived from dwl, which grew from the wlroots
 TinyWL example and carries code influenced by dwm and sway. See `LICENSE*` and
 the Git history for the complete notices.
-# gluewc
