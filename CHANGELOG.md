@@ -125,6 +125,14 @@
 
 ### Fixed
 
+- A keybinding that spawns a program which is not installed no longer dumps
+  core. The forked child still shares the compositor's wlroots and GL state, so
+  reporting the failure through `die()` ran the exit handlers over that state,
+  crashed, and the crash handler wrote a 40 MB core file — for nothing worse
+  than a missing terminal. The child now prints the same message and leaves
+  through `_exit()`. Both fork sites had it: the keybinding and the `-s`
+  startup command
+
 - The flake builds. It never had, and nobody had tried it: `strictDeps` puts a
   nativeBuildInput's pkg-config files on `PKG_CONFIG_PATH_FOR_BUILD` and the
   wrapper on `PATH` replaces `PKG_CONFIG_PATH` with the host list alone, so

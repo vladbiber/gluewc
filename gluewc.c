@@ -479,6 +479,7 @@ static void motionnotify(uint32_t time, struct wlr_input_device *device, double 
 static void motionrelative(struct wl_listener *listener, void *data);
 static void moveresize(const Arg *arg);
 static void movetowsfollow(const Arg *arg);
+static void childdie(const char *what, const char *cmd);
 static void movewsdir(const Arg *arg);
 static void movewsstep(const Arg *arg);
 static void outputmgrapply(struct wl_listener *listener, void *data);
@@ -6477,7 +6478,7 @@ run(char *startup_cmd)
 			close(piperw[0]);
 			close(piperw[1]);
 			execl("/bin/sh", "/bin/sh", "-c", startup_cmd, NULL);
-			die("startup: execl:");
+			childdie("startup execl", "/bin/sh");
 		}
 		dup2(piperw[1], STDOUT_FILENO);
 		close(piperw[1]);
@@ -7528,6 +7529,18 @@ setup(void)
 #endif
 }
 
+/* A child that has forked but not exec'd still shares the compositor's
+ * wlroots and GL state, so it has to leave through _exit(): exit() runs the
+ * handlers that tear that state down, which crashes, and the crash handler
+ * then dumps core over nothing worse than a missing binary. */
+void
+childdie(const char *what, const char *cmd)
+{
+	fprintf(stderr, "gluewc: %s %s failed: ", what, cmd);
+	perror(NULL);
+	_exit(1);
+}
+
 void
 spawn(const Arg *arg)
 {
@@ -7535,7 +7548,7 @@ spawn(const Arg *arg)
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
 		execvp(((char **)arg->v)[0], (char **)arg->v);
-		die("gluewc: execvp %s failed:", ((char **)arg->v)[0]);
+		childdie("execvp", ((char **)arg->v)[0]);
 	}
 }
 
