@@ -163,7 +163,8 @@ and a notification naming the line. `Super+Shift+R` still reloads by hand.
 | `Super+right-drag` | Resize the window against its neighbours |
 | `Super+Shift+drag` | Drag the drift canvas around with the mouse |
 | `Super+W`, `Super+±`, `Super+0` | Drift: fit, zoom, 1:1 |
-| `Super+wheel` / `Super+Shift+wheel` | Change workspace / zoom the drift camera |
+| `Super+wheel` / `Super+Ctrl+wheel` | Change workspace / take the window along |
+| `Super+Shift+wheel` | Zoom the drift camera |
 | `Super+F` | Workspace-area fullscreen |
 | `Super+Shift+F` | Real fullscreen |
 | `Super+V` | Toggle centered floating |

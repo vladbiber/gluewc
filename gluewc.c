@@ -499,6 +499,7 @@ static void saveoverviewstate(int active);
 static void overviewtoggle(const Arg *arg);
 static int overviewvalid(Monitor *m);
 static void workspacestep(int dir);
+static void workspacestepcarry(int dir, int carry);
 static void gesturebegin(uint32_t fingers);
 static void gestureupdate(uint32_t fingers, double dx, double dy);
 static void swipebeginnotify(struct wl_listener *listener, void *data);
@@ -1407,9 +1408,13 @@ axisnotify(struct wl_listener *listener, void *data)
 	if (super_group && super_group->super_down
 			&& (event->source == WL_POINTER_AXIS_SOURCE_WHEEL
 				|| event->source == WL_POINTER_AXIS_SOURCE_WHEEL_TILT)) {
+		struct wlr_keyboard *keeb = wlr_seat_get_keyboard(seat);
+
 		super_group->super_alone = 0;
+		/* Mod+Ctrl+wheel takes the window along to the workspace it lands on */
 		if (dir)
-			workspacestep(dir);
+			workspacestepcarry(dir, keeb && (wlr_keyboard_get_modifiers(keeb)
+					& WLR_MODIFIER_CTRL));
 		return;
 	}
 	/* over the shell's own surfaces the wheel belongs to them - the overview
@@ -5300,6 +5305,13 @@ overviewtoggle(const Arg *arg)
 static void
 workspacestep(int dir)
 {
+	workspacestepcarry(dir, 0);
+}
+
+/* carry takes the focused window along, the way Mod+Ctrl+arrow does */
+static void
+workspacestepcarry(int dir, int carry)
+{
 	Arg a = {.i = dir};
 	Monitor *m = xytomon(cursor->x, cursor->y);
 
@@ -5309,6 +5321,8 @@ workspacestep(int dir)
 		return;
 	if (overview_active)
 		overviewnavigate((selmon->ws + NUMWS + dir) % NUMWS, dir);
+	else if (!overview_visible && carry)
+		movewsstep(&a);
 	else if (!overview_visible)
 		wsstep(&a);
 }

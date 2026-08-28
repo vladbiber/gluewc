@@ -10,6 +10,9 @@
   the scroll layout, which stacks workspaces vertically the way niri does. A
   press across that axis does nothing. New actions
   `wm:move_to_workspace_left/right/up/down`
+- `Super+Ctrl+wheel` takes the window along to the workspace the wheel lands
+  on, the mouse counterpart of `Super+Ctrl+Arrow`. Plain `Super+wheel` still
+  only changes the view
 - Screenshots without reaching for a script: `Print` saves the screen and
   `Shift+Print` saves an area drawn with the mouse, both into
   `$XDG_PICTURES_DIR/Screenshots`; `Ctrl+Print` and `Super+Shift+S` put the

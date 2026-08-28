@@ -100,6 +100,21 @@ int main(int argc, char *argv[])
 			wl_display_roundtrip(dpy);
 			continue;
 		}
+		if (!strcmp(argv[i], "MC-down")) {
+			/* Super and Ctrl held together, for the wheel tests */
+			zwp_virtual_keyboard_v1_key(kb, t++, 125, WL_KEYBOARD_KEY_STATE_PRESSED);
+			zwp_virtual_keyboard_v1_key(kb, t++, 29, WL_KEYBOARD_KEY_STATE_PRESSED);
+			zwp_virtual_keyboard_v1_modifiers(kb, 64 | 4, 0, 0, 0);
+			wl_display_roundtrip(dpy);
+			continue;
+		}
+		if (!strcmp(argv[i], "MC-up")) {
+			zwp_virtual_keyboard_v1_key(kb, t++, 29, WL_KEYBOARD_KEY_STATE_RELEASED);
+			zwp_virtual_keyboard_v1_key(kb, t++, 125, WL_KEYBOARD_KEY_STATE_RELEASED);
+			zwp_virtual_keyboard_v1_modifiers(kb, 0, 0, 0, 0);
+			wl_display_roundtrip(dpy);
+			continue;
+		}
 		if (!strcmp(argv[i], "M-down")) {
 			zwp_virtual_keyboard_v1_key(kb, t++, 125, WL_KEYBOARD_KEY_STATE_PRESSED);
 			zwp_virtual_keyboard_v1_modifiers(kb, 64, 0, 0, 0);
