@@ -185,16 +185,48 @@ finix has no systemd, and it spells several options differently: it carries
 display-manager session registry. The module sets only the options the running
 system actually declares, so the same import works on both:
 
+The system flake lives in `/etc/finix`, so all three edits go there. In
+`/etc/finix/flake.nix`, add the input:
+
 ```nix
-inputs.gluewc.url = "github:vladbiber/gluewc";
-imports = [ inputs.gluewc.nixosModules.default ];
-programs.gluewc.enable = true;
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    finix.url = "github:finix-community/finix";
+    gluewc.url = "github:vladbiber/gluewc";
+  };
 ```
 
-Rebuild with `finix-rebuild switch`. The session entry travels with the package
-in `share/wayland-sessions`, which is all a greeter reading `XDG_DATA_DIRS`
-needs, and `gluewc-session` starts the audio daemons itself where there are no
-user services to enable.
+and the module, in the same `modules` list that already holds `labwc`, `sway`
+and the rest:
+
+```nix
+      modules = with finix.nixosModules; [
+        { nixpkgs.pkgs = nixpkgs.lib.mkDefault pkgs; }
+        (./configuration.nix)
+        inputs.gluewc.nixosModules.default
+        # ... the finix modules already listed here
+      ];
+```
+
+Then in `/etc/finix/configuration.nix`, next to whichever `programs.<wm>.enable`
+is already there:
+
+```nix
+  programs.gluewc.enable = true;
+  environment.systemPackages = with pkgs; [ alacritty rofi ];
+```
+
+The terminal and the launcher are not optional in practice: the compiled
+defaults bind `Super+Q` and `Super+Return` to alacritty and `Super+Space` to
+rofi, and without them you log into a working compositor that shows a black
+screen and opens nothing. Swap them for what you prefer and change the
+bindings in `~/.config/gluewc/config.conf`.
+
+Rebuild with `sudo finix-rebuild switch` and pick gluewc in tuigreet. The
+session entry travels with the package in `share/wayland-sessions`, which is
+exactly where the greeter looks
+(`/run/current-system/sw/share/wayland-sessions`), and `gluewc-session` starts
+the audio daemons itself where there are no user services to enable.
 
 ## Required versions
 
