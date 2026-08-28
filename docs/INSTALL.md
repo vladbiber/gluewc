@@ -16,6 +16,9 @@ their name, so they sit next to any other wlroots a system already has.
 Useful modes:
 
 ```sh
+./install.sh --update        # pull, rebuild, install, then report config drift
+./install.sh --check-config  # only the drift report, nothing is built
+./install.sh --with-bar      # also set up the glueqs quickshell bar
 ./install.sh --dry-run       # show the package command
 ./install.sh --no-deps       # use dependencies already installed
 ./install.sh --no-audio      # skip PipeWire and friends
@@ -23,6 +26,31 @@ Useful modes:
 ./install.sh --prefix /opt/gluewc
 ./install.sh --uninstall
 ```
+
+### Updating
+
+`--update` pulls the checkout it is run from, hands over to the freshly pulled
+script, rebuilds and installs. `--update --no-deps` skips the package manager
+and goes straight to the rebuild, which is what you want when nothing but
+gluewc itself has changed.
+
+Nothing in `~/.config` is rewritten. Instead, every install and update ends
+with a list of the settings and bindings the shipped defaults have that your
+own config does not — new keybindings land there rather than silently in a
+file you have edited. Settings are matched by name and bindings by their key
+combination, so a binding you deliberately pointed elsewhere is not reported as
+missing, and `autostart` is left out of the comparison entirely. `--check-config`
+prints that same list on its own.
+
+### The bar
+
+`--with-bar` installs [glueqs](https://github.com/vladbiber/glueqs), a
+quickshell bar written for gluewc: it adds quickshell where the distribution
+packages it, clones the bar into `~/.config/quickshell/glueqs` (or pulls it if
+it is already there) and appends `autostart = qs -c glueqs` to your config,
+once. quickshell is packaged on Arch, Void, Fedora 44+, Debian 14 and unstable,
+Ubuntu 26.10+ and in Gentoo's GURU overlay; where it is missing the bar is
+still set up and the script tells you where to get the binary.
 
 The default prefix is `/usr/local`; the display-manager entry is installed in
 `/usr/share/wayland-sessions`. Override `SESSIONDIR` when a distribution uses a

@@ -9,6 +9,10 @@ DESTDIR=${DESTDIR:-}
 WITH_DEPS=1
 WITH_AUDIO=1
 DEPS_ONLY=0
+UPDATE=0
+CHECK_CONFIG=0
+WITH_BAR=0
+BAR_REPO=${GLUEWC_BAR_REPO:-https://github.com/vladbiber/glueqs.git}
 WLROOTS_VERSION=0.20.2
 SCENEFX_VERSION=0.5
 DRY_RUN=0
@@ -25,6 +29,15 @@ Usage: install.sh [options]
                    PulseAudio bridges (they are installed by default so that
                    sound works in the session out of the box)
   --deps-only      install dependencies, then stop
+  --update         pull the newest source into this checkout, then build and
+                   install it. Your ~/.config/gluewc/config.conf is never
+                   touched; what is new in the defaults is listed at the end.
+                   Add --no-deps to skip the package manager and go straight
+                   to the rebuild
+  --check-config   only list what the defaults gained that your config does
+                   not have, and stop
+  --with-bar       also set up glueqs, the quickshell bar built for gluewc,
+                   and start it from the session. Works with --update too
   --dry-run        print the package-manager command without running it
   --uninstall      remove gluewc from the selected prefix
   -h, --help       show this help
@@ -97,6 +110,18 @@ while [ "$#" -gt 0 ]; do
 		DEPS_ONLY=1
 		shift
 		;;
+	--update)
+		UPDATE=1
+		shift
+		;;
+	--check-config)
+		CHECK_CONFIG=1
+		shift
+		;;
+	--with-bar)
+		WITH_BAR=1
+		shift
+		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -120,6 +145,148 @@ case "$PREFIX" in
 /*) ;;
 *) die "--prefix must be an absolute path" ;;
 esac
+
+USER_CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/gluewc/config.conf
+
+# Everything the shipped defaults declare and the personal config does not, so
+# an update can point at what it gained without editing anyone's file. Settings
+# are matched by key and bindings by the key combination, so a binding pointed
+# somewhere else on purpose does not show up as missing. autostart is skipped:
+# it is personal by nature and the defaults ship it commented out.
+config_report() {
+	def=$1
+	user=$2
+
+	[ -r "$def" ] || return 0
+	if [ ! -r "$user" ]; then
+		printf '\nNo personal config yet — the session writes one from the\n'
+		printf 'defaults the first time you log in.\n'
+		return 0
+	fi
+
+	report=$(awk -v userfile="$user" '
+		function ident(line,   a, count, key, combo) {
+			if (line ~ /^[ \t]*#/ || line !~ /=/)
+				return ""
+			count = split(line, a, "=")
+			key = a[1]
+			gsub(/^[ \t]+|[ \t]+$/, "", key)
+			if (key == "autostart" || key == "")
+				return ""
+			if (key == "bind_insert" || key == "bind_normal") {
+				if (count < 3)
+					return ""
+				combo = a[2]
+				gsub(/^[ \t]+|[ \t]+$/, "", combo)
+				return key " " combo
+			}
+			return key
+		}
+		BEGIN {
+			while ((getline line < userfile) > 0) {
+				id = ident(line)
+				if (id != "")
+					have[id] = 1
+			}
+		}
+		{
+			id = ident($0)
+			if (id != "" && !(id in have)) {
+				sub(/^[ \t]+/, "")
+				print "  " $0
+			}
+		}
+	' "$def")
+
+	if [ -z "$report" ]; then
+		printf '\nYour config already has every setting and binding the defaults do.\n'
+		return 0
+	fi
+	printf '\n\033[1;34m==>\033[0m New in the defaults, missing from %s:\n\n' "$user"
+	printf '%s\n' "$report"
+	printf '\nThat file was not touched. Copy across whatever you want — saving it\n'
+	printf 'applies the change on the spot, no restart needed.\n'
+}
+
+# quickshell is packaged on Arch, Void, Fedora 44+, Debian 14/unstable and
+# Ubuntu 26.10+, and lives in the GURU overlay on Gentoo. Older releases and
+# Alpine have nothing, so this is deliberately allowed to fail: the bar's
+# config is set up either way and the note below says where to get the binary.
+install_bar_package() {
+	[ "$DRY_RUN" -eq 0 ] || return 0
+	case "$FAMILY" in
+	arch)   set -- pacman -S --needed --noconfirm quickshell ;;
+	debian) set -- apt-get install -y quickshell ;;
+	fedora) set -- dnf install -y quickshell ;;
+	void)   set -- xbps-install -Sy quickshell ;;
+	*)      return 0 ;;
+	esac
+	run_root "$@" || warn "could not install quickshell from the package manager"
+}
+
+install_bar() {
+	bardir=${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/glueqs
+
+	log "Setting up the glueqs bar"
+	install_bar_package
+	if [ -d "$bardir/.git" ]; then
+		git -C "$bardir" pull --ff-only || warn "could not update $bardir"
+	else
+		mkdir -p "$(dirname "$bardir")"
+		git clone --quiet "$BAR_REPO" "$bardir" \
+			|| die "could not clone the bar from $BAR_REPO"
+	fi
+
+	# The session writes the config at first login; seed it now so the
+	# autostart line has somewhere to live.
+	if [ ! -r "$USER_CONFIG" ] && [ -r "$SOURCE_DIR/config.def.conf" ]; then
+		mkdir -p "$(dirname "$USER_CONFIG")"
+		cp "$SOURCE_DIR/config.def.conf" "$USER_CONFIG"
+	fi
+	if [ -r "$USER_CONFIG" ] && ! grep -q '^[[:space:]]*autostart[[:space:]]*=[[:space:]]*qs -c glueqs' "$USER_CONFIG"; then
+		printf '\n# the glueqs bar, added by install.sh --with-bar\nautostart = qs -c glueqs\n' >> "$USER_CONFIG"
+		log "Added 'autostart = qs -c glueqs' to $USER_CONFIG"
+	fi
+
+	if ! command -v qs >/dev/null 2>&1 && ! command -v quickshell >/dev/null 2>&1; then
+		warn "quickshell is not installed and your distribution does not package it"
+		warn "get it from https://quickshell.outfoxxed.me — the bar is configured"
+		warn "already and starts as soon as the binary is on PATH"
+	fi
+}
+
+case "$0" in
+*/*|install.sh)
+	SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
+	;;
+*)
+	SELF_DIR=
+	;;
+esac
+if [ -n "$SELF_DIR" ] && [ ! -f "$SELF_DIR/gluewc.c" ]; then
+	SELF_DIR=
+fi
+
+if [ "$CHECK_CONFIG" -eq 1 ]; then
+	def=$SELF_DIR/config.def.conf
+	[ -r "$def" ] || def=$PREFIX/share/gluewc/config.def.conf
+	[ -r "$def" ] || die "no config.def.conf to compare against; run from a checkout or install first"
+	config_report "$def" "$USER_CONFIG"
+	exit 0
+fi
+
+# Pull first, then hand over to the script that came with the new source: a
+# running sh reads its own file as it goes, so rewriting it underneath is not
+# safe. GLUEWC_REEXEC stops that from happening twice.
+if [ "$UPDATE" -eq 1 ] && [ -z "${GLUEWC_REEXEC:-}" ] && [ -n "$SELF_DIR" ] \
+		&& [ -d "$SELF_DIR/.git" ]; then
+	log "Updating the checkout in $SELF_DIR"
+	command -v git >/dev/null 2>&1 || die "git is needed to update a checkout"
+	git -C "$SELF_DIR" pull --ff-only
+	GLUEWC_REEXEC=1
+	export GLUEWC_REEXEC
+	exec sh "$SELF_DIR/install.sh" "$@"
+fi
 
 if [ "$UNINSTALL" -eq 1 ]; then
 	log "Removing gluewc"
@@ -491,17 +658,8 @@ if [ "$DEPS_ONLY" -eq 1 ]; then
 	exit 0
 fi
 
-case "$0" in
-*/*|install.sh)
-	SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
-	;;
-*)
-	SCRIPT_DIR=
-	;;
-esac
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/gluewc.c" ] \
-		&& [ -f "$SCRIPT_DIR/Makefile" ]; then
-	SOURCE_DIR=$SCRIPT_DIR
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/Makefile" ]; then
+	SOURCE_DIR=$SELF_DIR
 else
 	log "Downloading gluewc ${REPO_REF}"
 	git clone --quiet --depth 1 --branch "$REPO_REF" "$REPO_URL" "$WORKDIR/gluewc"
@@ -520,5 +678,15 @@ log "Installing gluewc to $PREFIX"
 run_install make -C "$SOURCE_DIR" install PREFIX="$PREFIX" \
 	SESSIONDIR="$SESSIONDIR" DESTDIR="$DESTDIR" LDFLAGS="$RPATH_FLAGS"
 
-printf '\n\033[1;32mgluewc is installed.\033[0m Log out, select gluewc in your display manager, and log in.\n'
-printf 'TTY users can start it with: gluewc-session\n'
+if [ "$UPDATE" -eq 1 ]; then
+	printf '\n\033[1;32mgluewc is up to date.\033[0m Log out and back in to run the new build.\n'
+else
+	printf '\n\033[1;32mgluewc is installed.\033[0m Log out, select gluewc in your display manager, and log in.\n'
+	printf 'TTY users can start it with: gluewc-session\n'
+fi
+
+if [ "$WITH_BAR" -eq 1 ]; then
+	install_bar
+fi
+
+config_report "$SOURCE_DIR/config.def.conf" "$USER_CONFIG"

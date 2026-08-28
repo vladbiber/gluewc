@@ -4,6 +4,24 @@
 
 ### Added
 
+- `install.sh --update` pulls the checkout it runs from, hands over to the
+  script that came with the new source, rebuilds and installs. Re-running the
+  installer already worked from `curl | sh`, which clones fresh every time, but
+  from an existing checkout it rebuilt the same old source because nothing
+  pulled
+- Every install and update now ends by listing the settings and bindings the
+  shipped defaults have that your own `config.conf` does not, so new
+  keybindings surface instead of sitting unnoticed in a file the installer
+  must not rewrite. Settings match by name and bindings by key combination, so
+  one deliberately pointed elsewhere is not reported missing; `autostart` is
+  left out. `--check-config` prints the list on its own
+- `install.sh --with-bar` sets up glueqs, the quickshell bar written for
+  gluewc: the package where the distribution has one, a clone or pull of the
+  bar into `~/.config/quickshell/glueqs`, and a single `autostart = qs -c
+  glueqs` line. quickshell is missing from Alpine and older Fedora, Debian and
+  Ubuntu, so that step is allowed to fail — the bar is configured either way
+  and the script says where to get the binary
+
 - `Super+Ctrl+Arrow` takes the focused window along to the workspace in that
   direction, on the same axis `Super+Arrow` steps along when there is nothing
   left to focus: left and right in the BSP and drift layouts, up and down in

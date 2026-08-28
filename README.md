@@ -54,22 +54,42 @@ GitHub hands mp4 files over as downloads instead of playing them in the page.
 
 ## Install
 
-The installer detects the distribution, installs build dependencies and audio,
-builds a compatible SceneFX/wlroots pair when needed, and installs the session
-entry:
+One script covers all four cases. It detects the distribution, installs the
+build dependencies and audio, builds a compatible wlroots/SceneFX pair when
+the distribution does not package one, and installs the session entry. It asks
+for administrator privileges for the packages and the system install, and it
+never writes to `~/.config/gluewc/config.conf`.
+
+**Just the compositor:**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/vladbiber/gluewc/main/install.sh | sh
 ```
 
-It requests administrator privileges for packages and the system install. To
-inspect it before running:
+**With the bar** — [glueqs](https://github.com/vladbiber/glueqs), a quickshell
+bar built for gluewc. Adds quickshell, clones the bar into
+`~/.config/quickshell/glueqs` and starts it from the session:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vladbiber/gluewc/main/install.sh | sh -s -- --with-bar
+```
+
+**Update an existing checkout** — pulls the newest source, rebuilds, installs,
+and finishes by listing what the defaults gained that your own config does not
+have. Your config is left alone; you copy across whatever you want:
+
+```sh
+cd gluewc && ./install.sh --update          # add --with-bar to update that too
+./install.sh --check-config                 # only the list, no rebuild
+```
+
+**By hand**, to read the script first or to build without it:
 
 ```sh
 git clone https://github.com/vladbiber/gluewc.git
 cd gluewc
 less install.sh
-./install.sh
+./install.sh          # or: make && sudo make install
 ```
 
 The dependency resolver covers current releases of:
