@@ -7,9 +7,11 @@ curl -fsSL https://raw.githubusercontent.com/vladbiber/gluewc/main/install.sh | 
 ```
 
 The script uses the native package manager, then checks for the exact pkg-config
-modules required by gluewc. When `wlroots-0.19` or `scenefx-0.4` is unavailable,
-it builds wlroots 0.19.3 and SceneFX 0.4.1 from their official repositories.
-Versioned libraries can coexist with newer wlroots releases.
+modules required by gluewc. Arch, Alpine and Void package wlroots 0.20; on every
+other distribution the installer builds wlroots 0.20.2 from source. No
+distribution packages SceneFX 0.5 yet, so that one is always built from source
+unless `scenefx-0.5` is already installed. Both libraries carry their version in
+their name, so they sit next to any other wlroots a system already has.
 
 Useful modes:
 
@@ -33,19 +35,26 @@ follow their parent automatically. Recognised outright:
 
 | Family | Package manager | Recognised names |
 | --- | --- | --- |
-| arch | `pacman` | Arch, Manjaro, EndeavourOS, CachyOS, Garuda, Artix, ArcoLinux |
-| debian | `apt-get` | Debian 13+, Ubuntu 25.10+, Mint, Pop!\_OS, elementary, Zorin, Devuan, Kali, Raspberry Pi OS |
-| fedora | `dnf` | Fedora 43+, Nobara, RHEL, CentOS Stream, Rocky, AlmaLinux |
-| suse | `zypper` | openSUSE Tumbleweed and Leap |
-| gentoo | `emerge` | Gentoo |
+| arch | `pacman` | Arch, Manjaro, EndeavourOS, CachyOS, Garuda, Artix, ArcoLinux, Parabola, BlackArch, SteamOS, RebornOS, Obarun |
+| debian | `apt-get` | Debian 13+, Ubuntu 25.10+, Mint, Pop!\_OS, elementary, Zorin, Devuan, Kali, Raspberry Pi OS, MX, antiX, Deepin, Trisquel, KDE neon, PureOS, Parrot, SparkyLinux, Peppermint, TUXEDO OS |
+| fedora | `dnf` | Fedora 43+, Nobara, RHEL, CentOS Stream, Rocky, AlmaLinux, Ultramarine, Bazzite, Bluefin, Oracle Linux |
+| suse | `zypper` | openSUSE Tumbleweed and Leap, SLED, SLES, GeckoLinux |
+| gentoo | `emerge` | Gentoo, Funtoo, Calculate, Redcore, Pentoo |
 | alpine | `apk` | Alpine Edge, postmarketOS |
 | void | `xbps-install` | Void |
 | nixos | — | NixOS, through the flake (see below) |
+| finix | — | finix, through the flake (see below) |
 
-A distribution that matches none of these is not rejected outright: the
-installer looks for a package manager on `PATH` and uses the list of the family
-that owns it, which is what makes unlisted derivatives work. Only when no known
-package manager is found does it stop and point at the dependency list below.
+finix reports `ID=nixos` on purpose, so that the NixOS tooling it reuses keeps
+working. It is recognised by the name in `/etc/os-release` instead, ahead of the
+nixos branch.
+
+A distribution that matches none of these is not rejected: the installer looks
+for a package manager on `PATH` and uses the list of the family that owns it,
+which is what makes unlisted derivatives work. When there is no known package
+manager either, it says so and carries on — the source build below produces
+wlroots and SceneFX on any system with a compiler, and the version checks name
+whatever is still missing.
 
 Check what would happen without changing anything:
 
@@ -127,21 +136,41 @@ nixpkgs.overlays = [ gluewc.overlays.default ];
 environment.systemPackages = [ pkgs.gluewc ];
 ```
 
-The flake tracks `nixos-unstable` because it needs `wlroots_0_19` and
-`scenefx_0_4`; on a stable channel without those attributes, keep the flake's
+The flake tracks `nixos-unstable` because it needs `wlroots_0_20` and
+`scenefx_0_5`; on a stable channel without those attributes, keep the flake's
 own nixpkgs input rather than overriding it with `follows`.
+
+### finix
+
+finix has no systemd, and it spells several options differently: it carries
+`programs.pipewire`, `services.rtkit` and `services.polkit` where NixOS carries
+`services.pipewire`, `security.rtkit` and `security.polkit`, and it has no
+display-manager session registry. The module sets only the options the running
+system actually declares, so the same import works on both:
+
+```nix
+inputs.gluewc.url = "github:vladbiber/gluewc";
+imports = [ inputs.gluewc.nixosModules.default ];
+programs.gluewc.enable = true;
+```
+
+Rebuild with `finix-rebuild switch`. The session entry travels with the package
+in `share/wayland-sessions`, which is all a greeter reading `XDG_DATA_DIRS`
+needs, and `gluewc-session` starts the audio daemons itself where there are no
+user services to enable.
 
 ## Required versions
 
 | Dependency | Version |
 | --- | --- |
-| wlroots | 0.19.x |
-| SceneFX | 0.4.x |
-| Wayland | 1.23.1+ when building SceneFX |
-| libdrm | 2.4.122+ when building SceneFX |
-| Pixman | 0.43.0+ when building SceneFX |
-| libinput | distribution version compatible with wlroots 0.19 |
-| xkbcommon | distribution version compatible with wlroots 0.19 |
+| wlroots | 0.20.x |
+| SceneFX | 0.5.x |
+| Wayland | 1.24.0+ when building wlroots |
+| libdrm | 2.4.129+ when building wlroots |
+| Pixman | 0.43.0+ when building wlroots |
+| wayland-protocols | 1.47+ (wlroots 0.20 takes several protocol enums from it) |
+| xkbcommon | 1.8.0+ |
+| libinput | distribution version compatible with wlroots 0.20 |
 
 XCB, xcb-icccm and the Xwayland binary are needed by the default XWayland
 build. Meson, Ninja, pkg-config, a C compiler and wayland-protocols are build
@@ -152,17 +181,23 @@ requirements.
 Package names change over time; `install.sh --dry-run` shows the command used
 for the current system. The central packages are:
 
-- Arch: `wlroots0.19`, `wayland-protocols`, `libinput`, `libxkbcommon`,
-  `libxcb`, `xcb-util-wm`, `xorg-xwayland`
-- Gentoo: `gui-libs/wlroots:0.19`, `gui-libs/scenefx:0.4`,
-  `dev-libs/wayland-protocols`, `x11-libs/xcb-util-wm`, `x11-base/xwayland`
-- Alpine Edge: `wlroots0.19-dev`, `wayland-protocols`, `libinput-dev`,
-  `libxkbcommon-dev`, `libxcb-dev`, `xcb-util-wm-dev`, `xwayland`
-- Fedora/openSUSE/Void: their `*-devel` packages for wlroots, Wayland,
-  libinput, xkbcommon, Pixman, libdrm, Mesa, libseat and XCB
+- Arch: `wlroots0.20`, `wayland-protocols`, `libinput`, `libxkbcommon`,
+  `libxcb`, `xcb-util-wm`, `xcb-util-errors`, `xcb-util-renderutil`,
+  `xorg-xwayland`
+- Gentoo: neither wlroots 0.20 nor SceneFX 0.5 is in `::gentoo`, so both are
+  built from source on top of `dev-libs/wayland-protocols`,
+  `media-libs/libdisplay-info`, `dev-libs/libliftoff`, `x11-libs/xcb-util-wm`
+  and `x11-base/xwayland`
+- Alpine Edge: `wlroots0.20-dev`, `wayland-protocols`, `libinput-dev`,
+  `libxkbcommon-dev`, `libxcb-dev`, `xcb-util-wm-dev`, `libseat-dev`,
+  `ninja-build`, `xwayland`
+- Void: `wlroots0.20-devel` plus the `*-devel` packages for Wayland, libinput,
+  xkbcommon, Pixman, libdrm, Mesa, libseat and XCB
+- Fedora/openSUSE: their `*-devel` packages for Wayland, libinput, xkbcommon,
+  Pixman, libdrm, Mesa, libseat and XCB; wlroots and SceneFX are built here
 - Debian/Ubuntu: the matching `lib*-dev` packages; the installer builds the
   versioned wlroots and SceneFX libraries
-- NixOS: `wlroots_0_19` and `scenefx_0_4`, wired up by the flake
+- NixOS and finix: `wlroots_0_20` and `scenefx_0_5`, wired up by the flake
 
 For audio, add `pipewire` and `wireplumber` plus the bridges your distribution
 splits out: `pipewire-pulse` and `pipewire-alsa` on Arch, Debian, Ubuntu and
@@ -186,7 +221,7 @@ or install them yourself from the lists above and skip to the next step. Verify
 that the two libraries gluewc links against are visible:
 
 ```sh
-pkg-config --modversion wlroots-0.19 scenefx-0.4
+pkg-config --modversion wlroots-0.20 scenefx-0.5
 ```
 
 **2. Build.**
@@ -276,7 +311,7 @@ writes `~/.local/state/gluewc.log`.
 Check dependency discovery:
 
 ```sh
-pkg-config --modversion wlroots-0.19 scenefx-0.4
+pkg-config --modversion wlroots-0.20 scenefx-0.5
 ```
 
 Check the installed binary and runtime libraries:

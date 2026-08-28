@@ -9,6 +9,8 @@ DESTDIR=${DESTDIR:-}
 WITH_DEPS=1
 WITH_AUDIO=1
 DEPS_ONLY=0
+WLROOTS_VERSION=0.20.2
+SCENEFX_VERSION=0.5
 DRY_RUN=0
 UNINSTALL=0
 WORKDIR=
@@ -145,7 +147,9 @@ DISTRO=" ${ID:-unknown} ${ID_LIKE:-} "
 family_by_pm() {
 	# Derivatives that carry neither a known ID nor a known ID_LIKE still
 	# have a package manager, and that is enough to pick the right list.
-	if command -v nixos-rebuild >/dev/null 2>&1; then
+	if command -v finix-rebuild >/dev/null 2>&1; then
+		printf 'finix'
+	elif command -v nixos-rebuild >/dev/null 2>&1; then
 		printf 'nixos'
 	elif command -v pacman >/dev/null 2>&1; then
 		printf 'arch'
@@ -167,18 +171,35 @@ family_by_pm() {
 }
 
 detect_family() {
+	# finix keeps ID=nixos so that the NixOS tooling it reuses keeps working,
+	# so it is recognised by its own name, directory and rebuild command
+	# before the nixos branch can claim it.
+	case "$DISTRO" in
+	*finix*)
+		printf 'finix'
+		return ;;
+	esac
+	case " ${NAME:-} ${PRETTY_NAME:-} " in
+	*[Ff]inix*)
+		printf 'finix'
+		return ;;
+	esac
 	case "$DISTRO" in
 	*nixos*)
 		printf 'nixos' ;;
-	*arch*|*manjaro*|*artix*|*endeavouros*|*cachyos*|*garuda*|*arcolinux*)
+	*arch*|*manjaro*|*artix*|*endeavouros*|*cachyos*|*garuda*|*arcolinux*|\
+	*parabola*|*blackarch*|*steamos*|*rebornos*|*obarun*)
 		printf 'arch' ;;
-	*debian*|*ubuntu*|*devuan*|*linuxmint*|*pop*|*elementary*|*zorin*|*kali*|*raspbian*)
+	*debian*|*ubuntu*|*devuan*|*linuxmint*|*pop*|*elementary*|*zorin*|*kali*|\
+	*raspbian*|*mx*|*antix*|*deepin*|*trisquel*|*neon*|*pureos*|*parrot*|\
+	*sparky*|*peppermint*|*tuxedo*)
 		printf 'debian' ;;
-	*fedora*|*rhel*|*centos*|*nobara*|*rocky*|*almalinux*)
+	*fedora*|*rhel*|*centos*|*nobara*|*rocky*|*almalinux*|*ultramarine*|\
+	*bazzite*|*bluefin*|*oracle*|*scientific*)
 		printf 'fedora' ;;
-	*suse*|*opensuse*)
+	*suse*|*opensuse*|*sle[sd]*|*gecko*)
 		printf 'suse' ;;
-	*gentoo*)
+	*gentoo*|*funtoo*|*calculate*|*redcore*|*pentoo*)
 		printf 'gentoo' ;;
 	*alpine*|*postmarketos*)
 		printf 'alpine' ;;
@@ -207,6 +228,30 @@ audio_packages() {
 	esac
 }
 
+finix_instructions() {
+	cat <<'EOF'
+
+finix builds gluewc from the flake in this repository instead of installing
+loose packages, so this script does not touch the system:
+
+  nix run     github:vladbiber/gluewc                    # the compositor
+  nix shell   github:vladbiber/gluewc -c gluewc-session  # a full session
+  nix develop github:vladbiber/gluewc                    # a shell for make
+
+System-wide, add the flake to /etc/finix and enable the module:
+
+  inputs.gluewc.url = "github:vladbiber/gluewc";
+  imports = [ inputs.gluewc.nixosModules.default ];
+  programs.gluewc.enable = true;
+
+then rebuild with 'finix-rebuild switch'. The module notices that finix has
+no systemd and wires up the options finix does have (programs.pipewire,
+services.rtkit, services.polkit) instead of the NixOS ones; the session
+starts the audio daemons itself either way. docs/INSTALL.md has the full
+example. Inside a 'nix develop' shell this script still works with --no-deps.
+EOF
+}
+
 nixos_instructions() {
 	cat <<'EOF'
 
@@ -230,6 +275,10 @@ EOF
 
 install_packages() {
 	case "$FAMILY" in
+	finix)
+		finix_instructions
+		exit 0
+		;;
 	nixos)
 		nixos_instructions
 		exit 0
@@ -237,7 +286,9 @@ install_packages() {
 	arch)
 		set -- pacman -Syu --needed --noconfirm base-devel git meson ninja \
 			pkgconf wayland wayland-protocols libinput libxkbcommon libxcb \
-			xcb-util-wm libdrm mesa pixman seatd wlroots0.19 xorg-xwayland
+			xcb-util-wm xcb-util-errors xcb-util-renderutil libdrm mesa \
+			pixman seatd libdisplay-info libliftoff hwdata wlroots0.20 \
+			xorg-xwayland
 		;;
 	debian)
 		if [ "$DRY_RUN" -eq 0 ]; then
@@ -262,7 +313,7 @@ install_packages() {
 			libseat-devel libdisplay-info-devel libliftoff-devel \
 			systemd-devel libxcb-devel xcb-util-wm-devel \
 			xcb-util-errors-devel xcb-util-renderutil-devel hwdata \
-			wlroots-devel xorg-x11-server-Xwayland
+			xorg-x11-server-Xwayland
 		;;
 	suse)
 		set -- zypper --non-interactive install -t pattern devel_basis \
@@ -271,21 +322,30 @@ install_packages() {
 			Mesa-libgbm-devel Mesa-libEGL-devel Mesa-libGLESv2-devel \
 			libseat-devel libdisplay-info-devel libliftoff-devel \
 			libudev-devel libxcb-devel xcb-util-wm-devel \
-			xcb-util-errors-devel xcb-util-renderutil-devel wlroots-devel \
-			xwayland
+			xcb-util-errors-devel xcb-util-renderutil-devel xwayland
 		;;
 	gentoo)
+		# wlroots 0.20 and SceneFX 0.5 are not in ::gentoo, so only the
+		# build dependencies come from portage and the two libraries are
+		# built from source below.
 		set -- emerge --noreplace --ask=n dev-vcs/git dev-build/meson \
 			dev-build/ninja virtual/pkgconfig dev-libs/wayland \
 			dev-libs/wayland-protocols dev-libs/libinput \
-			x11-libs/libxkbcommon x11-libs/libxcb x11-libs/xcb-util-wm \
-			gui-libs/wlroots:0.19 gui-libs/scenefx:0.4 x11-base/xwayland
+			x11-libs/libxkbcommon x11-libs/pixman x11-libs/libdrm \
+			media-libs/mesa sys-auth/seatd media-libs/libdisplay-info \
+			dev-libs/libliftoff sys-apps/hwdata x11-libs/libxcb \
+			x11-libs/xcb-util-wm x11-libs/xcb-util-errors \
+			x11-libs/xcb-util-renderutil x11-base/xwayland
 		;;
 	alpine)
-		set -- apk add build-base git meson ninja pkgconf wayland-dev \
+		# alpine calls Ninja ninja-build, and the seat headers live in
+		# libseat-dev rather than in the daemon package.
+		set -- apk add build-base git meson ninja-build pkgconf wayland-dev \
 			wayland-protocols libinput-dev libxkbcommon-dev libxcb-dev \
-			xcb-util-wm-dev libdrm-dev mesa-dev pixman-dev seatd-dev \
-			wlroots0.19-dev scenefx-dev xwayland
+			xcb-util-wm-dev xcb-util-errors-dev xcb-util-renderutil-dev \
+			libdrm-dev mesa-dev pixman-dev seatd libseat-dev \
+			libdisplay-info-dev libliftoff-dev hwdata wlroots0.20-dev \
+			xwayland
 		;;
 	void)
 		set -- xbps-install -Sy base-devel git meson ninja pkg-config \
@@ -294,10 +354,17 @@ install_packages() {
 			libseat-devel libdisplay-info-devel libliftoff-devel \
 			eudev-libudev-devel libxcb-devel xcb-util-wm-devel \
 			xcb-util-errors-devel xcb-util-renderutil-devel hwids \
-			wlroots-devel xorg-server-xwayland
+			wlroots0.20-devel xorg-server-xwayland
 		;;
 	*)
-		die "no package list for '${ID:-unknown}' and no known package manager found; install the requirements from docs/INSTALL.md and rerun with --no-deps"
+		# Anything else still builds: the source fallback below produces
+		# wlroots and SceneFX, and the checks after it name whatever is
+		# still missing instead of guessing package names for a
+		# distribution this script has never seen.
+		warn "no package list for '${ID:-unknown}' and no known package manager found"
+		warn "install the requirements from docs/INSTALL.md; the build continues"
+		warn "and will say which of them are still missing"
+		return 0
 		;;
 	esac
 
@@ -329,7 +396,7 @@ enable_audio() {
 }
 
 if [ "$WITH_DEPS" -eq 1 ]; then
-	if [ "$FAMILY" = nixos ]; then
+	if [ "$FAMILY" = nixos ] || [ "$FAMILY" = finix ]; then
 		: # install_packages prints the flake instructions and stops
 	elif [ "$WITH_AUDIO" -eq 1 ]; then
 		log "Installing build dependencies and audio for ${PRETTY_NAME:-${ID:-Linux}} (family: $FAMILY)"
@@ -354,19 +421,25 @@ pc_at_least() {
 	pkg-config --atleast-version="$2" "$1" 2>/dev/null
 }
 
+# The minimums are the ones wlroots 0.20 and SceneFX 0.5 ask for themselves.
 check_source_requirements() {
-	pc_at_least wayland-server 1.23.1 || die "Wayland >= 1.23.1 is required to build SceneFX 0.4"
-	pc_at_least libdrm 2.4.122 || die "libdrm >= 2.4.122 is required to build SceneFX 0.4"
-	pc_at_least pixman-1 0.43.0 || die "pixman >= 0.43.0 is required to build SceneFX 0.4"
+	pc_at_least wayland-server 1.24.0 || die "Wayland >= 1.24.0 is required to build wlroots 0.20"
+	pc_at_least libdrm 2.4.129 || die "libdrm >= 2.4.129 is required to build wlroots 0.20"
+	pc_at_least xkbcommon 1.8.0 || die "xkbcommon >= 1.8.0 is required to build wlroots 0.20"
+	pc_at_least pixman-1 0.43.0 || die "pixman >= 0.43.0 is required to build wlroots 0.20"
+	pc_at_least wayland-protocols 1.47 || die "wayland-protocols >= 1.47 is required to build wlroots 0.20"
 }
 
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/gluewc-install.XXXXXX")
 
-if ! pkg-config --exists wlroots-0.19; then
-	[ "$WITH_DEPS" -eq 1 ] || die "missing dependency: wlroots-0.19"
+# Arch, Alpine and Void ship wlroots 0.20; everywhere else it is built here.
+# No distribution packages SceneFX 0.5 yet, so that one is always built unless
+# it is already installed.
+if ! pkg-config --exists wlroots-0.20; then
+	[ "$WITH_DEPS" -eq 1 ] || die "missing dependency: wlroots-0.20"
 	check_source_requirements
-	log "Building wlroots 0.19.3"
-	git clone --quiet --depth 1 --branch 0.19.3 \
+	log "Building wlroots $WLROOTS_VERSION"
+	git clone --quiet --depth 1 --branch "$WLROOTS_VERSION" \
 		https://gitlab.freedesktop.org/wlroots/wlroots.git "$WORKDIR/wlroots"
 	meson setup "$WORKDIR/wlroots/build" "$WORKDIR/wlroots" \
 		--prefix="$PREFIX" --libdir=lib --buildtype=release \
@@ -375,13 +448,13 @@ if ! pkg-config --exists wlroots-0.19; then
 	run_root meson install -C "$WORKDIR/wlroots/build"
 fi
 
-pkg-config --exists wlroots-0.19 || die "wlroots-0.19 was not found after installation"
+pkg-config --exists wlroots-0.20 || die "wlroots-0.20 was not found after installation"
 
-if ! pkg-config --exists scenefx-0.4; then
-	[ "$WITH_DEPS" -eq 1 ] || die "missing dependency: scenefx-0.4"
+if ! pkg-config --exists scenefx-0.5; then
+	[ "$WITH_DEPS" -eq 1 ] || die "missing dependency: scenefx-0.5"
 	check_source_requirements
-	log "Building SceneFX 0.4.1"
-	git clone --quiet --depth 1 --branch 0.4.1 \
+	log "Building SceneFX $SCENEFX_VERSION"
+	git clone --quiet --depth 1 --branch "$SCENEFX_VERSION" \
 		https://github.com/wlrfx/scenefx.git "$WORKDIR/scenefx"
 	meson setup "$WORKDIR/scenefx/build" "$WORKDIR/scenefx" \
 		--prefix="$PREFIX" --libdir=lib --buildtype=release \
@@ -390,7 +463,7 @@ if ! pkg-config --exists scenefx-0.4; then
 	run_root meson install -C "$WORKDIR/scenefx/build"
 fi
 
-pkg-config --exists scenefx-0.4 || die "scenefx-0.4 was not found after installation"
+pkg-config --exists scenefx-0.5 || die "scenefx-0.5 was not found after installation"
 
 if [ -z "$DESTDIR" ] && command -v ldconfig >/dev/null 2>&1; then
 	run_root ldconfig

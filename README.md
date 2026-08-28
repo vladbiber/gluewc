@@ -2,15 +2,15 @@
 
 [![build](https://github.com/vladbiber/gluewc/actions/workflows/build.yml/badge.svg)](https://github.com/vladbiber/gluewc/actions/workflows/build.yml)
 [![license: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
-[![wlroots 0.19](https://img.shields.io/badge/wlroots-0.19-7aa2f7.svg)](https://gitlab.freedesktop.org/wlroots/wlroots/-/releases/0.19.3)
+[![wlroots 0.20](https://img.shields.io/badge/wlroots-0.20-7aa2f7.svg)](https://gitlab.freedesktop.org/wlroots/wlroots/-/releases/0.20.2)
 
 gluewc is a compact, animated Wayland compositor built around automatic BSP
 tiling. It combines a dwl-sized C codebase with workspaces, a GNOME-style
 overview, touchpad gestures, runtime configuration and SceneFX visuals.
 
 It is a fork of [dwl 0.8](https://codeberg.org/dwl/dwl), using
-[wlroots 0.19](https://gitlab.freedesktop.org/wlroots/wlroots) and
-[SceneFX 0.4](https://github.com/wlrfx/scenefx/releases/tag/0.4.1).
+[wlroots 0.20](https://gitlab.freedesktop.org/wlroots/wlroots) and
+[SceneFX 0.5](https://github.com/wlrfx/scenefx/releases/tag/0.5).
 
 ![The overview opening, then the scroll and drift layouts](docs/media/glue-tour.webp)
 
@@ -90,7 +90,7 @@ A distribution outside the list still works: the installer falls back to
 whichever package manager it finds on `PATH` and uses that family's package
 set. Gentoo is hardware-tested and the Arch path is exercised by CI. The
 remaining resolvers target their current package sets. Older distributions may
-not have the Wayland, libdrm and Pixman versions required by SceneFX 0.4; see
+not have the Wayland, libdrm and Pixman versions required by wlroots 0.20; see
 [the installation guide](docs/INSTALL.md) for manual and troubleshooting
 instructions.
 

@@ -48,14 +48,14 @@
               libGL
               libgbm
               seatd
-              wlroots_0_19
             ]
             # Attributes that were renamed: the newer name first, the older one
             # as a fallback, so the flake evaluates on either nixpkgs.
             ++ [
               (pkgs.libxcb or pkgs.xorg.libxcb)
               (pkgs.libxcb-wm or pkgs.xorg.xcbutilwm)
-              (pkgs.scenefx_0_4 or pkgs.scenefx)
+              (pkgs.wlroots_0_20 or pkgs.wlroots)
+              (pkgs.scenefx_0_5 or pkgs.scenefx)
             ];
 
           makeFlags = [
@@ -116,15 +116,32 @@
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt-tree);
 
+      # The module runs on NixOS and on finix. finix has no systemd, so it
+      # carries programs.pipewire, services.rtkit and services.polkit where
+      # NixOS carries services.pipewire, security.rtkit and security.polkit,
+      # and it has no display-manager session registry at all. Every one of
+      # those is set only when the running system declares it, so the same
+      # module evaluates on both.
       nixosModules.default =
         {
           config,
+          options,
           pkgs,
           lib,
           ...
         }:
         let
           cfg = config.programs.gluewc;
+          declares = path: lib.hasAttrByPath path options;
+          setIfDeclared =
+            path: value: lib.optionalAttrs (declares path) (lib.setAttrByPath path value);
+          # Whichever spelling this system has, or nothing at all.
+          setFirstDeclared =
+            paths: value:
+            let
+              found = lib.findFirst declares null paths;
+            in
+            if found == null then { } else lib.setAttrByPath found value;
         in
         {
           options.programs.gluewc = {
@@ -147,34 +164,52 @@
             };
           };
 
-          config = lib.mkIf cfg.enable {
-            environment.systemPackages = [ cfg.package ];
-            services.displayManager.sessionPackages = [ cfg.package ];
-
-            programs.xwayland.enable = lib.mkDefault true;
-            hardware.graphics.enable = lib.mkDefault true;
-            security.polkit.enable = true;
-            fonts.enableDefaultPackages = lib.mkDefault true;
-
-            xdg.portal = {
-              enable = lib.mkDefault true;
-              extraPortals = with pkgs; [
-                xdg-desktop-portal-wlr
-                xdg-desktop-portal-gtk
-              ];
-              config.gluewc.default = lib.mkDefault [
-                "wlr"
-                "gtk"
-              ];
-            };
-
-            security.rtkit.enable = lib.mkIf cfg.audio (lib.mkDefault true);
-            services.pipewire = lib.mkIf cfg.audio {
-              enable = lib.mkDefault true;
-              alsa.enable = lib.mkDefault true;
-              pulse.enable = lib.mkDefault true;
-            };
-          };
+          config = lib.mkIf cfg.enable (
+            lib.mkMerge [
+              {
+                # The package carries share/wayland-sessions/gluewc.desktop,
+                # which is all a greeter reading XDG_DATA_DIRS needs.
+                environment.systemPackages = [ cfg.package ];
+              }
+              (setIfDeclared [ "services" "displayManager" "sessionPackages" ] [ cfg.package ])
+              (setIfDeclared [ "programs" "xwayland" "enable" ] (lib.mkDefault true))
+              (setIfDeclared [ "hardware" "graphics" "enable" ] (lib.mkDefault true))
+              (setIfDeclared [ "fonts" "enableDefaultPackages" ] (lib.mkDefault true))
+              (setFirstDeclared [
+                [ "security" "polkit" "enable" ]
+                [ "services" "polkit" "enable" ]
+              ] true)
+              (setIfDeclared [ "xdg" "portal" ] {
+                enable = lib.mkDefault true;
+                extraPortals = with pkgs; [
+                  xdg-desktop-portal-wlr
+                  xdg-desktop-portal-gtk
+                ];
+                config.gluewc.default = lib.mkDefault [
+                  "wlr"
+                  "gtk"
+                ];
+              })
+              (lib.mkIf cfg.audio (
+                lib.mkMerge [
+                  (setFirstDeclared [
+                    [ "security" "rtkit" "enable" ]
+                    [ "services" "rtkit" "enable" ]
+                  ] (lib.mkDefault true))
+                  # gluewc-session starts the daemons itself, so a system
+                  # without user services still gets sound from this.
+                  (setFirstDeclared [
+                    [ "services" "pipewire" ]
+                    [ "programs" "pipewire" ]
+                  ] {
+                    enable = lib.mkDefault true;
+                    alsa.enable = lib.mkDefault true;
+                    pulse.enable = lib.mkDefault true;
+                  })
+                ]
+              ))
+            ]
+          );
         };
     };
 }

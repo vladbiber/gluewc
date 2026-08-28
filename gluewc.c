@@ -49,7 +49,7 @@
 #include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <scenefx/types/wlr_scene.h>
-#include <scenefx/types/fx/corner_location.h>
+#include <scenefx/types/fx/clipped_region.h>
 #include <scenefx/render/fx_renderer/fx_renderer.h>
 #include <wlr/types/wlr_foreign_toplevel_management_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
@@ -73,6 +73,7 @@
 #include <xcb/xcb.h>
 #endif
 
+#include "xdg-shell-protocol.h"
 #include "util.h"
 #include "dwl-ipc-unstable-v2-protocol.h"
 
@@ -153,6 +154,7 @@ struct Client {
 	} border; /* edge-only frame plus four rounded outer-corner pieces */
 	struct wlr_scene_tree *scene_surface;
 	struct wlr_scene_buffer *surfbuf; /* main surface buffer, for fx */
+	struct wlr_scene_blur *blur; /* backdrop blur behind that buffer */
 	struct wlr_foreign_toplevel_handle_v1 *ftl;
 	struct wl_list link;
 	struct wl_list flink;
@@ -882,6 +884,31 @@ clientborders(Client *c, int width, int height, int bw, int radius)
 	wlr_scene_rect_set_size(c->border.bottom_left, radius, radius);
 	wlr_scene_node_set_position(&c->border.bottom_left->node, 0,
 			MAX(0, height - radius));
+
+	if (c->blur) {
+		wlr_scene_blur_set_size(c->blur, MAX(0, width - 2 * bw),
+				MAX(0, height - 2 * bw));
+		wlr_scene_blur_set_corner_radius(c->blur, MAX(0, radius - bw));
+		wlr_scene_node_set_position(&c->blur->node, bw, bw);
+	}
+}
+
+/* SceneFX 0.5 keeps the backdrop blur in a node of its own that is masked by
+ * the buffer it belongs to, so a cloned buffer needs a cloned blur node. */
+static void
+cloneblur(struct wlr_scene_buffer *src, struct wlr_scene_buffer *clone,
+		struct wlr_scene_tree *tree, int width, int height,
+		struct fx_corner_radii corners)
+{
+	struct wlr_scene_blur *blur;
+
+	if (!linked_nodes_get_sibling(&src->blur)
+			|| !(blur = wlr_scene_blur_create(tree, width, height)))
+		return;
+	wlr_scene_blur_set_corner_radii(blur, corners);
+	wlr_scene_blur_set_transparency_mask_source(blur, clone);
+	wlr_scene_node_set_position(&blur->node, clone->node.x, clone->node.y);
+	wlr_scene_node_place_below(&blur->node, &clone->node);
 }
 
 void
@@ -896,23 +923,25 @@ applyeffects(Client *c)
 		client_set_border_enabled(c, visible);
 
 		/* Edges are square; only the four outer pieces carry the radius. */
-		wlr_scene_rect_set_corner_radius(c->border.top, 0, CORNER_LOCATION_NONE);
-		wlr_scene_rect_set_corner_radius(c->border.bottom, 0, CORNER_LOCATION_NONE);
-		wlr_scene_rect_set_corner_radius(c->border.left, 0, CORNER_LOCATION_NONE);
-		wlr_scene_rect_set_corner_radius(c->border.right, 0, CORNER_LOCATION_NONE);
-		wlr_scene_rect_set_corner_radius(c->border.top_left, r, CORNER_LOCATION_TOP_LEFT);
-		wlr_scene_rect_set_corner_radius(c->border.top_right, r, CORNER_LOCATION_TOP_RIGHT);
-		wlr_scene_rect_set_corner_radius(c->border.bottom_right, r, CORNER_LOCATION_BOTTOM_RIGHT);
-		wlr_scene_rect_set_corner_radius(c->border.bottom_left, r, CORNER_LOCATION_BOTTOM_LEFT);
+		wlr_scene_rect_set_corner_radii(c->border.top, corner_radii_none());
+		wlr_scene_rect_set_corner_radii(c->border.bottom, corner_radii_none());
+		wlr_scene_rect_set_corner_radii(c->border.left, corner_radii_none());
+		wlr_scene_rect_set_corner_radii(c->border.right, corner_radii_none());
+		wlr_scene_rect_set_corner_radii(c->border.top_left, corner_radii_new(r, 0, 0, 0));
+		wlr_scene_rect_set_corner_radii(c->border.top_right, corner_radii_new(0, r, 0, 0));
+		wlr_scene_rect_set_corner_radii(c->border.bottom_right, corner_radii_new(0, 0, r, 0));
+		wlr_scene_rect_set_corner_radii(c->border.bottom_left, corner_radii_new(0, 0, 0, r));
 	}
 	if (c->surfbuf) {
-		wlr_scene_buffer_set_corner_radius(c->surfbuf,
-				MAX(0, r - (int)c->bw), CORNER_LOCATION_ALL);
-		wlr_scene_buffer_set_backdrop_blur(c->surfbuf, blurenabled && !fs);
-		wlr_scene_buffer_set_backdrop_blur_optimized(c->surfbuf, 0);
-		wlr_scene_buffer_set_backdrop_blur_ignore_transparent(c->surfbuf, 1);
+		wlr_scene_buffer_set_corner_radius(c->surfbuf, MAX(0, r - (int)c->bw));
 		if (!c->anim.fadein)
 			wlr_scene_buffer_set_opacity(c->surfbuf, clientopacity(c));
+	}
+	if (c->blur) {
+		/* masking the blur with the surface keeps it inside the parts the
+		 * client actually paints, the way ignore_transparent used to */
+		wlr_scene_blur_set_transparency_mask_source(c->blur, c->surfbuf);
+		wlr_scene_node_set_enabled(&c->blur->node, blurenabled && !fs);
 	}
 }
 
@@ -958,13 +987,7 @@ closeanimclone(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 	wlr_scene_buffer_set_dest_size(b->scene, width, height);
 	wlr_scene_buffer_set_opacity(b->scene, buffer->opacity);
 	wlr_scene_buffer_set_filter_mode(b->scene, WLR_SCALE_FILTER_BILINEAR);
-	wlr_scene_buffer_set_corner_radius(b->scene, buffer->corner_radius,
-			buffer->corners);
-	wlr_scene_buffer_set_backdrop_blur(b->scene, buffer->backdrop_blur);
-	wlr_scene_buffer_set_backdrop_blur_optimized(b->scene,
-			buffer->backdrop_blur_optimized);
-	wlr_scene_buffer_set_backdrop_blur_ignore_transparent(b->scene,
-			buffer->backdrop_blur_ignore_transparent);
+	wlr_scene_buffer_set_corner_radii(b->scene, buffer->corners);
 	wlr_scene_buffer_set_opaque_region(b->scene, &buffer->opaque_region);
 	b->opacity = buffer->opacity;
 	b->x = sx - a->x;
@@ -972,6 +995,7 @@ closeanimclone(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 	b->width = width;
 	b->height = height;
 	wlr_scene_node_set_position(&b->scene->node, b->x, b->y);
+	cloneblur(buffer, b->scene, a->tree, width, height, buffer->corners);
 	a->minx = MIN(a->minx, b->x);
 	a->miny = MIN(a->miny, b->y);
 	a->maxx = MAX(a->maxx, b->x + width);
@@ -4552,9 +4576,9 @@ overviewclone(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 	OverviewClone *oc = data;
 	struct wlr_scene_buffer *clone;
 	struct wlr_scene_buffer_set_buffer_options options;
-	enum corner_location corners;
+	struct fx_corner_radii corners;
 	float scale;
-	int width, height, radius;
+	int width, height, dstw, dsth;
 
 	if (!buffer->buffer)
 		return;
@@ -4576,24 +4600,23 @@ overviewclone(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 	if (buffer->src_box.width > 0 && buffer->src_box.height > 0)
 		wlr_scene_buffer_set_source_box(clone, &buffer->src_box);
 	wlr_scene_buffer_set_transform(clone, buffer->transform);
-	wlr_scene_buffer_set_dest_size(clone, MAX(1, (int)roundf(width * oc->scalex)),
-			MAX(1, (int)roundf(height * oc->scaley)));
+	dstw = MAX(1, (int)roundf(width * oc->scalex));
+	dsth = MAX(1, (int)roundf(height * oc->scaley));
+	wlr_scene_buffer_set_dest_size(clone, dstw, dsth);
 	wlr_scene_buffer_set_opacity(clone, buffer->opacity * oc->opacity);
 	wlr_scene_buffer_set_filter_mode(clone, WLR_SCALE_FILTER_BILINEAR);
 	scale = MIN(oc->scalex, oc->scaley);
-	radius = oc->radius >= 0 ? oc->radius
-			: MAX(0, (int)roundf(buffer->corner_radius * scale));
-	corners = oc->radius >= 0 ? CORNER_LOCATION_ALL : buffer->corners;
-	wlr_scene_buffer_set_corner_radius(clone, radius, corners);
-	wlr_scene_buffer_set_backdrop_blur(clone, buffer->backdrop_blur);
-	wlr_scene_buffer_set_backdrop_blur_optimized(clone,
-			buffer->backdrop_blur_optimized);
-	wlr_scene_buffer_set_backdrop_blur_ignore_transparent(clone,
-			buffer->backdrop_blur_ignore_transparent);
+	corners = oc->radius >= 0 ? corner_radii_all(oc->radius)
+			: corner_radii_new((int)roundf(buffer->corners.top_left * scale),
+				(int)roundf(buffer->corners.top_right * scale),
+				(int)roundf(buffer->corners.bottom_right * scale),
+				(int)roundf(buffer->corners.bottom_left * scale));
+	wlr_scene_buffer_set_corner_radii(clone, corners);
 	wlr_scene_buffer_set_opaque_region(clone, &buffer->opaque_region);
 	wlr_scene_node_set_position(&clone->node,
 			oc->x + (int)roundf((sx - oc->srcx) * oc->scalex),
 			oc->y + (int)roundf((sy - oc->srcy) * oc->scaley));
+	cloneblur(buffer, clone, oc->tree, dstw, dsth, corners);
 	oc->count++;
 }
 
@@ -4662,13 +4685,12 @@ overviewwindowdraw(struct wlr_scene_tree *tree, Client *c,
 		int fbw = MAX(2, (int)roundf(borderpx * scale) + 1);
 		struct wlr_scene_rect *ring = wlr_scene_rect_create(tree,
 				box->width + 2 * fbw, box->height + 2 * fbw, bcolor);
-		wlr_scene_rect_set_corner_radius(ring, radius + fbw,
-				CORNER_LOCATION_ALL);
+		wlr_scene_rect_set_corner_radius(ring, radius + fbw);
 		wlr_scene_node_set_position(&ring->node, box->x - fbw, box->y - fbw);
 	}
 	content = wlr_scene_tree_create(tree);
 	back = wlr_scene_rect_create(content, box->width, box->height, windowcolor);
-	wlr_scene_rect_set_corner_radius(back, radius, CORNER_LOCATION_ALL);
+	wlr_scene_rect_set_corner_radius(back, radius);
 	wlr_scene_node_set_position(&back->node, box->x, box->y);
 
 	if (!c->scene)
@@ -4738,7 +4760,7 @@ overviewpanel(Monitor *m, unsigned int ws, const struct wlr_box *box, float opac
 			oc.radius, 24.0f, shadowcolor);
 	wlr_scene_node_set_position(&shadow->node, box->x, box->y + 8);
 	panel = wlr_scene_rect_create(tree, box->width, box->height, panelcolor);
-	wlr_scene_rect_set_corner_radius(panel, oc.radius, CORNER_LOCATION_ALL);
+	wlr_scene_rect_set_corner_radius(panel, oc.radius);
 	wlr_scene_node_set_position(&panel->node, box->x, box->y);
 
 	wl_list_for_each(l, &m->layers[ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND], link) {
@@ -4746,7 +4768,7 @@ overviewpanel(Monitor *m, unsigned int ws, const struct wlr_box *box, float opac
 			wlr_scene_node_for_each_buffer(&l->scene->node, overviewclone, &oc);
 	}
 	shade = wlr_scene_rect_create(tree, box->width, box->height, shadecolor);
-	wlr_scene_rect_set_corner_radius(shade, oc.radius, CORNER_LOCATION_ALL);
+	wlr_scene_rect_set_corner_radius(shade, oc.radius);
 	wlr_scene_node_set_position(&shade->node, box->x, box->y);
 
 	wl_list_for_each_reverse(c, &clients, link) {
@@ -5661,6 +5683,13 @@ mapnotify(struct wl_listener *listener, void *data)
 	wlr_scene_node_lower_to_bottom(&c->border.top_right->node);
 	wlr_scene_node_lower_to_bottom(&c->border.bottom_right->node);
 	wlr_scene_node_lower_to_bottom(&c->border.bottom_left->node);
+
+	/* The blur goes under the frame and the surface, so it paints what is
+	 * behind the whole window. */
+	if ((c->blur = wlr_scene_blur_create(c->scene, 0, 0))) {
+		c->blur->node.data = c;
+		wlr_scene_node_lower_to_bottom(&c->blur->node);
+	}
 
 	/* Find the main surface buffer for rounded corners/blur/fade */
 	wlr_scene_node_for_each_buffer(&c->scene_surface->node, findsurfbuf, c);
@@ -7933,6 +7962,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 	c->border.left = c->border.right = NULL;
 	c->border.top_left = c->border.top_right = NULL;
 	c->border.bottom_right = c->border.bottom_left = NULL;
+	c->blur = NULL;
 	motionnotify(0, NULL, 0, 0, 0, 0);
 	ipcnotifyall();
 	if (overview_visible)
@@ -8215,8 +8245,7 @@ xwaylandready(struct wl_listener *listener, void *data)
 	/* Set the default XWayland cursor to match the rest of gluewc. */
 	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default", 1)))
 		wlr_xwayland_set_cursor(xwayland,
-				xcursor->images[0]->buffer, xcursor->images[0]->width * 4,
-				xcursor->images[0]->width, xcursor->images[0]->height,
+				wlr_xcursor_image_get_buffer(xcursor->images[0]),
 				xcursor->images[0]->hotspot_x, xcursor->images[0]->hotspot_y);
 }
 #endif

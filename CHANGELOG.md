@@ -2,7 +2,55 @@
 
 ## Unreleased
 
+### Changed
+
+- gluewc now builds against wlroots 0.20 and SceneFX 0.5. The two move
+  together: SceneFX 0.5 requires wlroots 0.20, and neither is compatible with
+  the 0.19/0.4 pair gluewc used before
+- Rounded corners now go through the SceneFX 0.5 corner API: the corner
+  location enum was replaced by a four-value `fx_corner_radii`, so each corner
+  carries its own radius. The rendered result is unchanged
+- The backdrop blur behind a window is now a scene node of its own instead of a
+  flag on the surface buffer, masked by that buffer so it stays inside the
+  parts the client actually paints — the same effect the old
+  `ignore_transparent` flag gave. Window clones in the overview and in the
+  close animation get a matching blur node, so previews keep their effects
+- The installer follows: it installs `wlroots0.20` where a distribution has it
+  (Arch, Alpine, Void) and builds wlroots 0.20.2 from source everywhere else.
+  No distribution packages SceneFX 0.5 yet, so that one is always built from
+  source
+
+
+- Mod-F1 to Mod-F3 replace the bare F1 to F3 media binds in insert mode, which
+  gives applications their function keys back
+- `gluewc-session` looks for its default config next to its own prefix, and
+  honours `GLUEWC_DATADIR`, so a custom `--prefix` and a Nix store path seed
+  `~/.config/gluewc/config.conf` like a distribution install does
+- BSP direct manipulation: Mod-drag no longer tears a tiled window out into a
+  float, it hands the window the tile it is dropped on and the two trade
+  places in the tree; Mod-right-drag moves the splits the window sits between
+  instead of floating it, grabbing the edges nearest the click so a corner
+  drag resizes in both directions at once. Windows that are already floating
+  are still moved and resized as floats and stay floating.
+
 ### Added
+
+- finix is recognised as its own family. It reports `ID=nixos` so that the
+  NixOS tooling it reuses keeps working, so it is matched on the name in
+  `/etc/os-release` ahead of the nixos branch, and it gets its own flake
+  instructions pointing at `/etc/finix` and `finix-rebuild`
+- The NixOS module runs on finix. finix has no systemd and spells several
+  options differently — `programs.pipewire`, `services.rtkit` and
+  `services.polkit` against NixOS's `services.pipewire`, `security.rtkit` and
+  `security.polkit` — and has no display-manager session registry at all. The
+  module now sets only the options the running system declares, so one import
+  works on both
+- The installer knows many more derivatives by name: Parabola, BlackArch,
+  SteamOS, RebornOS and Obarun; MX, antiX, Deepin, Trisquel, KDE neon, PureOS,
+  Parrot, SparkyLinux, Peppermint and TUXEDO OS; Ultramarine, Bazzite, Bluefin
+  and Oracle Linux; SLED, SLES and GeckoLinux; Funtoo, Calculate, Redcore and
+  Pentoo
+
 
 - Media, volume and backlight on the function row: Mod-F1 plays and pauses,
   Mod-F2 and Mod-F3 step through tracks, Mod-Shift-F2 and Mod-Shift-F3 seek,
@@ -35,6 +83,16 @@
 
 ### Fixed
 
+- The Alpine package list asked for `ninja` and `seatd-dev`, neither of which
+  exists there; the names are `ninja-build` and `libseat-dev`
+- The Gentoo package list asked for `gui-libs/scenefx`, which is not in
+  `::gentoo` but in an overlay, and left out `media-libs/libdisplay-info`,
+  `dev-libs/libliftoff` and `sys-apps/hwdata`
+- An unknown distribution with no recognised package manager no longer stops
+  the installer: it warns, builds the libraries from source and lets the
+  version checks name whatever is still missing
+
+
 - Clicks landed in the wrong place in the drift layout at any zoom other than
   1:1, and the error grew with the zoom until parts of a window stopped
   responding at all. wlroots hit-tests a scaled buffer in destination pixels
@@ -51,20 +109,6 @@
 - A drift window that takes its real size after mapping, which is the first
   thing a browser does, is resized around its middle, so it keeps the place it
   was given instead of walking out of it
-
-### Changed
-
-- Mod-F1 to Mod-F3 replace the bare F1 to F3 media binds in insert mode, which
-  gives applications their function keys back
-- `gluewc-session` looks for its default config next to its own prefix, and
-  honours `GLUEWC_DATADIR`, so a custom `--prefix` and a Nix store path seed
-  `~/.config/gluewc/config.conf` like a distribution install does
-- BSP direct manipulation: Mod-drag no longer tears a tiled window out into a
-  float, it hands the window the tile it is dropped on and the two trade
-  places in the tree; Mod-right-drag moves the splits the window sits between
-  instead of floating it, grabbing the edges nearest the click so a corner
-  drag resizes in both directions at once. Windows that are already floating
-  are still moved and resized as floats and stay floating.
 
 ## 0.2.0 — 2026-08-15
 
