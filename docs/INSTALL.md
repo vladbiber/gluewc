@@ -115,7 +115,10 @@ belong to the user session and not to root.
 NixOS is supported through the flake in this repository rather than through the
 installer, which deliberately refuses to touch a NixOS system.
 
-Try it without installing anything:
+Try it without installing anything. These build the compositor and then run
+it, so the screen is taken over until you quit with `Super+Shift+Q`; nothing is
+installed and nothing is left behind. Run them from a TTY, not from inside
+another Wayland session, unless you want a nested one:
 
 ```sh
 nix run github:vladbiber/gluewc                        # start the compositor

@@ -406,19 +406,24 @@ finix_instructions() {
 	cat <<'EOF'
 
 finix builds gluewc from the flake in this repository instead of installing
-loose packages, so this script does not touch the system:
+loose packages, so this script does not touch the system.
 
-  nix run     github:vladbiber/gluewc                    # the compositor
-  nix shell   github:vladbiber/gluewc -c gluewc-session  # a full session
+To TRY it, without installing anything. These build the compositor and then
+start it: the screen is taken over until you quit with Super+Shift+Q, and
+nothing is left behind afterwards.
+
+  nix run     github:vladbiber/gluewc                    # the compositor alone
+  nix shell   github:vladbiber/gluewc -c gluewc-session  # with D-Bus and audio
   nix develop github:vladbiber/gluewc                    # a shell for make
 
-System-wide, add the flake to /etc/finix and enable the module:
+To INSTALL it, add the flake to /etc/finix and enable the module:
 
   inputs.gluewc.url = "github:vladbiber/gluewc";
   imports = [ inputs.gluewc.nixosModules.default ];
   programs.gluewc.enable = true;
 
-then rebuild with 'finix-rebuild switch'. The module notices that finix has
+then rebuild with 'finix-rebuild switch' and pick gluewc in your greeter.
+The module notices that finix has
 no systemd and wires up the options finix does have (programs.pipewire,
 services.rtkit, services.polkit) instead of the NixOS ones; the session
 starts the audio daemons itself either way. docs/INSTALL.md has the full
@@ -447,13 +452,17 @@ nixos_instructions() {
 	cat <<'EOF'
 
 NixOS builds gluewc from the flake in this repository instead of installing
-loose packages, so this script does not touch the system:
+loose packages, so this script does not touch the system.
 
-  nix run     github:vladbiber/gluewc                    # the compositor
-  nix shell   github:vladbiber/gluewc -c gluewc-session  # a full session
+To TRY it, without installing anything. These build the compositor and then
+start it: the screen is taken over until you quit with Super+Shift+Q, and
+nothing is left behind afterwards.
+
+  nix run     github:vladbiber/gluewc                    # the compositor alone
+  nix shell   github:vladbiber/gluewc -c gluewc-session  # with D-Bus and audio
   nix develop github:vladbiber/gluewc                    # a shell for make
 
-System-wide, add the flake to your configuration and enable the module:
+To INSTALL it, add the flake to your configuration and enable the module:
 
   inputs.gluewc.url = "github:vladbiber/gluewc";
   imports = [ inputs.gluewc.nixosModules.default ];
