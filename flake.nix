@@ -58,10 +58,15 @@
               (pkgs.scenefx_0_5 or pkgs.scenefx)
             ];
 
+          # wayland-scanner is a build tool, so strictDeps puts its pkg-config
+          # file on PKG_CONFIG_PATH_FOR_BUILD, where the pkg-config wrapper on
+          # PATH cannot see it. The binary itself is right there on PATH, so
+          # name it instead of asking pkg-config where it lives.
           makeFlags = [
             "PREFIX=$(out)"
             "SESSIONDIR=$(out)/share/wayland-sessions"
             "VERSION=${version}"
+            "WAYLAND_SCANNER=wayland-scanner"
           ];
 
           # The session wrapper looks its helpers up on PATH: the compositor
