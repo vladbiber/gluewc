@@ -18,12 +18,13 @@ jobs:
       - name: Install dependencies
         run: >-
           pacman -Syu --needed --noconfirm git meson ninja pkgconf wayland
-          wayland-protocols libinput libxkbcommon libxcb xcb-util-wm libdrm
-          mesa pixman seatd wlroots0.19 xorg-xwayland
+          wayland-protocols libinput libxkbcommon libxcb xcb-util-wm
+          xcb-util-errors xcb-util-renderutil libdrm mesa pixman seatd
+          libdisplay-info libliftoff hwdata wlroots0.20 xorg-xwayland
 
       - name: Build SceneFX
         run: |
-          git clone --quiet --depth 1 --branch 0.4.1 https://github.com/wlrfx/scenefx.git /tmp/scenefx
+          git clone --quiet --depth 1 --branch 0.5 https://github.com/wlrfx/scenefx.git /tmp/scenefx
           meson setup /tmp/scenefx/build /tmp/scenefx --prefix=/usr --libdir=lib --buildtype=release -Dexamples=false -Dwerror=false
           meson compile -C /tmp/scenefx/build
           meson install -C /tmp/scenefx/build
