@@ -243,9 +243,16 @@ install_bar() {
 		mkdir -p "$(dirname "$USER_CONFIG")"
 		cp "$SOURCE_DIR/config.def.conf" "$USER_CONFIG"
 	fi
-	if [ -r "$USER_CONFIG" ] && ! grep -q '^[[:space:]]*autostart[[:space:]]*=[[:space:]]*qs -c glueqs' "$USER_CONFIG"; then
-		printf '\n# the glueqs bar, added by install.sh --with-bar\nautostart = qs -c glueqs\n' >> "$USER_CONFIG"
-		log "Added 'autostart = qs -c glueqs' to $USER_CONFIG"
+	# Upstream installs both names and every distribution that packages it
+	# keeps them, but start whichever one is actually here rather than
+	# assuming, and fall back to the short one when nothing is installed yet.
+	barcmd=qs
+	if ! command -v qs >/dev/null 2>&1 && command -v quickshell >/dev/null 2>&1; then
+		barcmd=quickshell
+	fi
+	if [ -r "$USER_CONFIG" ] && ! grep -qE '^[[:space:]]*autostart[[:space:]]*=[[:space:]]*(qs|quickshell) -c glueqs' "$USER_CONFIG"; then
+		printf '\n# the glueqs bar, added by install.sh --with-bar\nautostart = %s -c glueqs\n' "$barcmd" >> "$USER_CONFIG"
+		log "Added 'autostart = $barcmd -c glueqs' to $USER_CONFIG"
 	fi
 
 	if ! command -v qs >/dev/null 2>&1 && ! command -v quickshell >/dev/null 2>&1; then
