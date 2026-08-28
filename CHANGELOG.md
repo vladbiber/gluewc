@@ -104,6 +104,14 @@
 
 ### Fixed
 
+- `make` finds the wlroots and SceneFX the installer builds. They land under
+  `PREFIX`, which is not on pkg-config's default search path on most
+  distributions, so a plain `make` — and `sudo make install`, which drops the
+  environment — failed with "Package 'wlroots-0.20' was not found" until
+  `PKG_CONFIG_PATH` was set by hand. `config.mk` now adds
+  `$PREFIX/lib/pkgconfig` and `$PREFIX/lib64/pkgconfig` itself, behind
+  whatever `PKG_CONFIG_PATH` already holds
+
 - The Alpine package list asked for `ninja` and `seatd-dev`, neither of which
   exists there; the names are `ninja-build` and `libseat-dev`
 - The Gentoo package list asked for `gui-libs/scenefx`, which is not in

@@ -218,10 +218,13 @@ cd gluewc
 ```
 
 or install them yourself from the lists above and skip to the next step. Verify
-that the two libraries gluewc links against are visible:
+that the two libraries gluewc links against are visible. `make` searches
+`$PREFIX/lib/pkgconfig` and `$PREFIX/lib64/pkgconfig` on its own, which is
+where the installer puts the wlroots and SceneFX it builds; bare `pkg-config`
+does not, so name the path when checking by hand:
 
 ```sh
-pkg-config --modversion wlroots-0.20 scenefx-0.5
+PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --modversion wlroots-0.20 scenefx-0.5
 ```
 
 **2. Build.**
@@ -308,10 +311,12 @@ writes `~/.local/state/gluewc.log`.
 
 ## Troubleshooting
 
-Check dependency discovery:
+Check dependency discovery. Most distributions do not search under
+`/usr/local` by default, so a library the installer built there is invisible to
+a bare `pkg-config` even though `make` finds it:
 
 ```sh
-pkg-config --modversion wlroots-0.20 scenefx-0.5
+PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --modversion wlroots-0.20 scenefx-0.5
 ```
 
 Check the installed binary and runtime libraries:

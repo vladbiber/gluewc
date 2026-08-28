@@ -1,7 +1,11 @@
 _VERSION = 0.3.0
 VERSION  = `git describe --tags --dirty 2>/dev/null || echo $(_VERSION)`
 
-PKG_CONFIG = pkg-config
+# The wlroots and SceneFX that install.sh builds land under PREFIX, which is
+# not on pkg-config's default search path on most distributions, so the prefix
+# is added here and a plain `make` finds them. A PKG_CONFIG_PATH set in the
+# environment is searched first, so it still wins.
+PKG_CONFIG = PKG_CONFIG_PATH="$${PKG_CONFIG_PATH:+$$PKG_CONFIG_PATH:}$(PREFIX)/lib/pkgconfig:$(PREFIX)/lib64/pkgconfig" pkg-config
 
 # paths
 PREFIX = /usr/local
