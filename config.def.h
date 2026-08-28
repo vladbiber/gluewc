@@ -146,6 +146,17 @@ static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TA
 #define BRTUP   BRTCMD("set +10%", "-A 10")
 #define BRTDOWN BRTCMD("set 10%-", "-U 10")
 
+/* Screenshots. grim takes the picture, slurp draws the crop rectangle and
+ * wl-copy puts it on the clipboard. slurp exits non-zero when the selection
+ * is cancelled with Escape, which is what stops the shot from being taken. */
+#define SHOTDIR "${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots"
+#define SHOTNAME SHOTDIR "/gluewc-$(date +%Y%m%d-%H%M%S).png"
+#define SHOTFULL SHCMD("mkdir -p " SHOTDIR " && grim " SHOTNAME)
+#define SHOTAREA SHCMD("box=$(slurp) || exit 0; mkdir -p " SHOTDIR \
+	" && grim -g \"$box\" " SHOTNAME)
+#define SHOTFULLCLIP SHCMD("grim - | wl-copy")
+#define SHOTAREACLIP SHCMD("box=$(slurp) || exit 0; grim -g \"$box\" - | wl-copy")
+
 /* commands */
 static const char *termcmd[] = { "alacritty", NULL };
 static const char *menucmd[] = { "rofi", "-show", "drun", NULL };
@@ -156,7 +167,10 @@ static const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_Return,     spawn,          {.v = termcmd} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Q,          quit,           {0} },
 	{ MODKEY,                    XKB_KEY_space,      spawn,          {.v = menucmd} },
-	{ 0,                         XKB_KEY_Print,      spawn,          SHCMD("grim") },
+	{ 0,                         XKB_KEY_Print,      spawn,          SHOTFULL },
+	{ WLR_MODIFIER_SHIFT,        XKB_KEY_Print,      spawn,          SHOTAREA },
+	{ WLR_MODIFIER_CTRL,         XKB_KEY_Print,      spawn,          SHOTFULLCLIP },
+	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_S,          spawn,          SHOTAREACLIP },
 	{ MODKEY,                    XKB_KEY_c,          killclient,     {0} },
 	{ MODKEY,                    XKB_KEY_Escape,     entermode,      {.i = ModeNormal} },
 	{ MODKEY,                    XKB_KEY_Tab,        focusnext,      {0} },
@@ -182,10 +196,14 @@ static const Key keys[] = {
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,         swapdir,        {.i = DirUp} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,       swapdir,        {.i = DirDown} },
 	/* pans the camera in the drift layout, swaps windows everywhere else */
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Left,       driftpankey,    {.i = DirLeft} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Right,      driftpankey,    {.i = DirRight} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Up,         driftpankey,    {.i = DirUp} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Down,       driftpankey,    {.i = DirDown} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Left,       movewsdir,      {.i = DirLeft} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Right,      movewsdir,      {.i = DirRight} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Up,         movewsdir,      {.i = DirUp} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Down,       movewsdir,      {.i = DirDown} },
+	{ MODKEY|WLR_MODIFIER_ALT,   XKB_KEY_Left,       driftpankey,    {.i = DirLeft} },
+	{ MODKEY|WLR_MODIFIER_ALT,   XKB_KEY_Right,      driftpankey,    {.i = DirRight} },
+	{ MODKEY|WLR_MODIFIER_ALT,   XKB_KEY_Up,         driftpankey,    {.i = DirUp} },
+	{ MODKEY|WLR_MODIFIER_ALT,   XKB_KEY_Down,       driftpankey,    {.i = DirDown} },
 	{ MODKEY,                    XKB_KEY_w,          driftfit,       {0} },
 	{ MODKEY,                    XKB_KEY_plus,       driftzoomkey,   {.f = +1.0f} },
 	{ MODKEY,                    XKB_KEY_equal,      driftzoomkey,   {.f = +1.0f} },

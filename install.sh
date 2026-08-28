@@ -252,6 +252,23 @@ example. Inside a 'nix develop' shell this script still works with --no-deps.
 EOF
 }
 
+# The default keybindings call out to these: grim and slurp take screenshots
+# (slurp draws the crop rectangle), wl-clipboard puts one on the clipboard,
+# playerctl drives the media keys and the backlight keys need brightnessctl,
+# or light, which is what ::gentoo carries. Without them those keys do
+# nothing, so they are installed alongside the compositor.
+session_packages() {
+	case "$1" in
+	arch)   printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
+	debian) printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
+	fedora) printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
+	suse)   printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
+	gentoo) printf 'gui-apps/grim gui-apps/slurp gui-apps/wl-clipboard media-sound/playerctl dev-libs/light' ;;
+	alpine) printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
+	void)   printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
+	esac
+}
+
 nixos_instructions() {
 	cat <<'EOF'
 
@@ -368,8 +385,8 @@ install_packages() {
 		;;
 	esac
 
-	# shellcheck disable=SC2046  # the package list is deliberately split
-	set -- "$@" $(audio_packages "$FAMILY")
+	# shellcheck disable=SC2046  # the package lists are deliberately split
+	set -- "$@" $(audio_packages "$FAMILY") $(session_packages "$FAMILY")
 
 	if [ "$DRY_RUN" -eq 1 ]; then
 		show_command "$@"

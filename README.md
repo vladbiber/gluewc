@@ -132,9 +132,11 @@ a TTY, run:
 gluewc-session
 ```
 
-The default bindings expect `alacritty`, `rofi`, `grim`, `playerctl`, and for
-volume and backlight either `wpctl`/`pactl` and `brightnessctl`/`light`. They
-are optional and every command can be replaced in the runtime config.
+The default bindings expect `alacritty`, `rofi`, `grim` and `slurp` for
+screenshots, `wl-clipboard` to put one on the clipboard, `playerctl` for the
+media keys, and for volume and backlight either `wpctl`/`pactl` and
+`brightnessctl`/`light`. The installer brings them in; they stay optional and
+every command can be replaced in the runtime config.
 
 ## First steps
 
@@ -153,7 +155,10 @@ and a notification naming the line. `Super+Shift+R` still reloads by hand.
 | `Super+Arrow` or `Super+H/J/K/L` | Directional focus |
 | `Super+Shift+Arrow` | Swap windows (nudge them in the drift layout) |
 | `Super+N` | Cycle BSP, scroll and drift layouts |
-| `Super+Ctrl+Arrow` | Pan the drift canvas |
+| `Super+Ctrl+Arrow` | Take the window along to the workspace that way |
+| `Super+Alt+Arrow` | Pan the drift canvas |
+| `Print` / `Shift+Print` | Screenshot the screen / a selected area |
+| `Ctrl+Print` / `Super+Shift+S` | The same, onto the clipboard |
 | `Super+drag` | Swap the window with the tile it is dropped on |
 | `Super+right-drag` | Resize the window against its neighbours |
 | `Super+Shift+drag` | Drag the drift canvas around with the mouse |

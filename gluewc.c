@@ -479,6 +479,7 @@ static void motionnotify(uint32_t time, struct wlr_input_device *device, double 
 static void motionrelative(struct wl_listener *listener, void *data);
 static void moveresize(const Arg *arg);
 static void movetowsfollow(const Arg *arg);
+static void movewsdir(const Arg *arg);
 static void movewsstep(const Arg *arg);
 static void outputmgrapply(struct wl_listener *listener, void *data);
 static void outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test);
@@ -2606,7 +2607,7 @@ driftfit(const Arg *arg)
 void
 driftpankey(const Arg *arg)
 {
-	/* Mod+Ctrl+arrow pans the camera; the other layouts keep swapping windows */
+	/* Mod+Alt+arrow pans the camera; the other layouts keep swapping windows */
 	Monitor *m = selmon;
 	double z, stepx, stepy;
 
@@ -6785,6 +6786,10 @@ cfgaction(const char *act, void (**func)(const Arg *), Arg *arg)
 		{ "wm:workspace_next",        wsstep,               {.i = +1} },
 		{ "wm:move_to_workspace_prev", movewsstep,          {.i = -1} },
 		{ "wm:move_to_workspace_next", movewsstep,          {.i = +1} },
+		{ "wm:move_to_workspace_left", movewsdir,           {.i = DirLeft} },
+		{ "wm:move_to_workspace_right", movewsdir,          {.i = DirRight} },
+		{ "wm:move_to_workspace_up",  movewsdir,            {.i = DirUp} },
+		{ "wm:move_to_workspace_down", movewsdir,           {.i = DirDown} },
 	};
 	size_t i;
 	int n;
@@ -7876,6 +7881,24 @@ movewsstep(const Arg *arg)
 		return;
 	a.ui = (selmon->ws + NUMWS + arg->i) % NUMWS;
 	movetowsfollow(&a);
+}
+
+void
+movewsdir(const Arg *arg)
+{
+	/* Take the window along to the workspace in that direction, on the
+	 * same axis focusdir() steps along when there is nothing left to focus:
+	 * the scroll layout stacks workspaces vertically like niri, the others
+	 * lay them out left to right. A press across the axis does nothing. */
+	Arg a;
+
+	if (!selmon)
+		return;
+	if (SCROLLLT(selmon) ? (arg->i == DirLeft || arg->i == DirRight)
+			: (arg->i == DirUp || arg->i == DirDown))
+		return;
+	a.i = (arg->i == DirLeft || arg->i == DirUp) ? -1 : +1;
+	movewsstep(&a);
 }
 
 void

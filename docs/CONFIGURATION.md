@@ -155,6 +155,7 @@ Actions:
 | `wm:toggle_split` | change the focused BSP split direction; in the scroll layout, maximize the column |
 | `wm:toggle_layout` | cycle the monitor through BSP, scroll and drift |
 | `wm:layout:bsp`, `wm:layout:scroll`, `wm:layout:drift` | select a layout directly |
+| `wm:move_to_workspace_left/right/up/down` | take the window along to the workspace that way, on the axis the layout puts workspaces on |
 | `wm:pan_left/right/up/down` | drift: pan the camera; swaps windows in the other layouts |
 | `wm:zoom_in`, `wm:zoom_out`, `wm:zoom_reset` | drift: camera zoom around the viewport centre |
 | `wm:zoom_fit` | drift: zoom to fit every window on the workspace |

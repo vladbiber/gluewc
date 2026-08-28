@@ -37,6 +37,7 @@ static const struct keymapent keys[] = {
 	{"F7",65},{"F8",66},{"F9",67},{"F10",68},{"F11",87},{"F12",88},
 	{"Left",105},{"Right",106},{"Up",103},{"Down",108},
 	{"PgUp",104},{"PgDn",109},
+	{"Print",99},
 };
 
 static int keycode(const char *n)
@@ -122,6 +123,7 @@ int main(int argc, char *argv[])
 				if (!strcmp(last, "M")) mods[nmods++] = 125;
 				else if (!strcmp(last, "S")) mods[nmods++] = 42;
 				else if (!strcmp(last, "C")) mods[nmods++] = 29;
+				else if (!strcmp(last, "A")) mods[nmods++] = 56;
 				else { fprintf(stderr, "bad mod %s\n", last); return 1; }
 			}
 			last = tok;
@@ -131,7 +133,8 @@ int main(int argc, char *argv[])
 			/* the compositor only sees modifier state we announce */
 			uint32_t depressed = 0;
 			for (m = 0; m < nmods; m++)
-				depressed |= mods[m] == 125 ? 64 : mods[m] == 42 ? 1 : 4;
+				depressed |= mods[m] == 125 ? 64 : mods[m] == 42 ? 1
+						: mods[m] == 56 ? 8 : 4;
 			for (m = 0; m < nmods; m++)
 				zwp_virtual_keyboard_v1_key(kb, t++, mods[m], WL_KEYBOARD_KEY_STATE_PRESSED);
 			zwp_virtual_keyboard_v1_modifiers(kb, depressed, 0, 0, 0);

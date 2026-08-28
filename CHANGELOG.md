@@ -2,38 +2,25 @@
 
 ## Unreleased
 
-### Changed
-
-- gluewc now builds against wlroots 0.20 and SceneFX 0.5. The two move
-  together: SceneFX 0.5 requires wlroots 0.20, and neither is compatible with
-  the 0.19/0.4 pair gluewc used before
-- Rounded corners now go through the SceneFX 0.5 corner API: the corner
-  location enum was replaced by a four-value `fx_corner_radii`, so each corner
-  carries its own radius. The rendered result is unchanged
-- The backdrop blur behind a window is now a scene node of its own instead of a
-  flag on the surface buffer, masked by that buffer so it stays inside the
-  parts the client actually paints — the same effect the old
-  `ignore_transparent` flag gave. Window clones in the overview and in the
-  close animation get a matching blur node, so previews keep their effects
-- The installer follows: it installs `wlroots0.20` where a distribution has it
-  (Arch, Alpine, Void) and builds wlroots 0.20.2 from source everywhere else.
-  No distribution packages SceneFX 0.5 yet, so that one is always built from
-  source
-
-
-- Mod-F1 to Mod-F3 replace the bare F1 to F3 media binds in insert mode, which
-  gives applications their function keys back
-- `gluewc-session` looks for its default config next to its own prefix, and
-  honours `GLUEWC_DATADIR`, so a custom `--prefix` and a Nix store path seed
-  `~/.config/gluewc/config.conf` like a distribution install does
-- BSP direct manipulation: Mod-drag no longer tears a tiled window out into a
-  float, it hands the window the tile it is dropped on and the two trade
-  places in the tree; Mod-right-drag moves the splits the window sits between
-  instead of floating it, grabbing the edges nearest the click so a corner
-  drag resizes in both directions at once. Windows that are already floating
-  are still moved and resized as floats and stay floating.
-
 ### Added
+
+- `Super+Ctrl+Arrow` takes the focused window along to the workspace in that
+  direction, on the same axis `Super+Arrow` steps along when there is nothing
+  left to focus: left and right in the BSP and drift layouts, up and down in
+  the scroll layout, which stacks workspaces vertically the way niri does. A
+  press across that axis does nothing. New actions
+  `wm:move_to_workspace_left/right/up/down`
+- Screenshots without reaching for a script: `Print` saves the screen and
+  `Shift+Print` saves an area drawn with the mouse, both into
+  `$XDG_PICTURES_DIR/Screenshots`; `Ctrl+Print` and `Super+Shift+S` put the
+  same two onto the clipboard. Cancelling the selection with Escape takes no
+  picture
+- The installer brings in what the default bindings call: `grim` and `slurp`
+  for screenshots, `wl-clipboard`, `playerctl` for the media keys and
+  `brightnessctl` (`dev-libs/light` on Gentoo, which is the fallback the
+  bindings already had) for the backlight. Those keys used to be bound to
+  helpers nothing installed
+
 
 - finix is recognised as its own family. It reports `ID=nixos` so that the
   NixOS tooling it reuses keeps working, so it is matched on the name in
@@ -80,6 +67,40 @@
   falls back to whichever package manager is on PATH instead of being rejected
 - A detailed git-and-make build walkthrough in the installation guide, covering
   `PREFIX`, `DESTDIR`, `config.h`, private wlroots builds and staying up to date
+
+### Changed
+
+- The drift camera pan moved from `Super+Ctrl+Arrow` to `Super+Alt+Arrow` to
+  make room for the workspace move. In the BSP and scroll layouts that
+  binding still swaps windows, which `Super+Shift+Arrow` already did
+- gluewc now builds against wlroots 0.20 and SceneFX 0.5. The two move
+  together: SceneFX 0.5 requires wlroots 0.20, and neither is compatible with
+  the 0.19/0.4 pair gluewc used before
+- Rounded corners now go through the SceneFX 0.5 corner API: the corner
+  location enum was replaced by a four-value `fx_corner_radii`, so each corner
+  carries its own radius. The rendered result is unchanged
+- The backdrop blur behind a window is now a scene node of its own instead of a
+  flag on the surface buffer, masked by that buffer so it stays inside the
+  parts the client actually paints — the same effect the old
+  `ignore_transparent` flag gave. Window clones in the overview and in the
+  close animation get a matching blur node, so previews keep their effects
+- The installer follows: it installs `wlroots0.20` where a distribution has it
+  (Arch, Alpine, Void) and builds wlroots 0.20.2 from source everywhere else.
+  No distribution packages SceneFX 0.5 yet, so that one is always built from
+  source
+
+
+- Mod-F1 to Mod-F3 replace the bare F1 to F3 media binds in insert mode, which
+  gives applications their function keys back
+- `gluewc-session` looks for its default config next to its own prefix, and
+  honours `GLUEWC_DATADIR`, so a custom `--prefix` and a Nix store path seed
+  `~/.config/gluewc/config.conf` like a distribution install does
+- BSP direct manipulation: Mod-drag no longer tears a tiled window out into a
+  float, it hands the window the tile it is dropped on and the two trade
+  places in the tree; Mod-right-drag moves the splits the window sits between
+  instead of floating it, grabbing the edges nearest the click so a corner
+  drag resizes in both directions at once. Windows that are already floating
+  are still moved and resized as floats and stay floating.
 
 ### Fixed
 
