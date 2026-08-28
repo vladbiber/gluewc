@@ -125,6 +125,21 @@
 
 ### Fixed
 
+- The flake builds. It never had, and nobody had tried it: `strictDeps` puts a
+  nativeBuildInput's pkg-config files on `PKG_CONFIG_PATH_FOR_BUILD` and the
+  wrapper on `PATH` replaces `PKG_CONFIG_PATH` with the host list alone, so
+  asking pkg-config where wayland-scanner lives returned nothing and make ran
+  `enum-header` as a command. The scanner is on `PATH` already, so a makeFlag
+  names it
+- `flake.lock` is committed. Without it `nix run github:vladbiber/gluewc` could
+  not start at all: an unlocked input has to be locked before evaluation, and a
+  flake fetched from GitHub lives in the read-only store
+- The flake instructions no longer read like installation steps. `nix run`
+  builds the compositor and then runs it — it takes over the screen and does
+  not return, which looked like an install that had hung — and the trial
+  command now names a terminal and a launcher, without which the compositor
+  comes up correctly and shows a black screen with no way to open anything
+
 - `make` finds the wlroots and SceneFX the installer builds. They land under
   `PREFIX`, which is not on pkg-config's default search path on most
   distributions, so a plain `make` — and `sudo make install`, which drops the

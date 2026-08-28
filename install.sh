@@ -412,8 +412,15 @@ To TRY it, without installing anything. These build the compositor and then
 start it: the screen is taken over until you quit with Super+Shift+Q, and
 nothing is left behind afterwards.
 
-  nix run     github:vladbiber/gluewc                    # the compositor alone
-  nix shell   github:vladbiber/gluewc -c gluewc-session  # with D-Bus and audio
+  nix shell github:vladbiber/gluewc nixpkgs#alacritty nixpkgs#rofi \
+    -c gluewc-session
+
+The terminal and the launcher are named on purpose. The package deliberately
+does not carry them, and the compiled defaults bind Super+Q and Super+Return
+to alacritty and Super+Space to rofi, so without them you get a working but
+completely empty screen and no way to open anything. Two leaner variants:
+
+  nix run     github:vladbiber/gluewc                    # bare, no session
   nix develop github:vladbiber/gluewc                    # a shell for make
 
 To INSTALL it, add the flake to /etc/finix and enable the module:
@@ -458,8 +465,15 @@ To TRY it, without installing anything. These build the compositor and then
 start it: the screen is taken over until you quit with Super+Shift+Q, and
 nothing is left behind afterwards.
 
-  nix run     github:vladbiber/gluewc                    # the compositor alone
-  nix shell   github:vladbiber/gluewc -c gluewc-session  # with D-Bus and audio
+  nix shell github:vladbiber/gluewc nixpkgs#alacritty nixpkgs#rofi \
+    -c gluewc-session
+
+The terminal and the launcher are named on purpose. The package deliberately
+does not carry them, and the compiled defaults bind Super+Q and Super+Return
+to alacritty and Super+Space to rofi, so without them you get a working but
+completely empty screen and no way to open anything. Two leaner variants:
+
+  nix run     github:vladbiber/gluewc                    # bare, no session
   nix develop github:vladbiber/gluewc                    # a shell for make
 
 To INSTALL it, add the flake to your configuration and enable the module:

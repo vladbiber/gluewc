@@ -121,10 +121,16 @@ installed and nothing is left behind. Run them from a TTY, not from inside
 another Wayland session, unless you want a nested one:
 
 ```sh
-nix run github:vladbiber/gluewc                        # start the compositor
-nix shell github:vladbiber/gluewc -c gluewc-session    # start a full session
+nix shell github:vladbiber/gluewc nixpkgs#alacritty nixpkgs#rofi -c gluewc-session
+nix run github:vladbiber/gluewc                        # the compositor, bare
 nix develop github:vladbiber/gluewc                    # a shell where make works
 ```
+
+Name the terminal and the launcher, as the first line does. The package does
+not carry them — an installed system picks its own — but the compiled defaults
+bind `Super+Q` and `Super+Return` to alacritty and `Super+Space` to rofi. Run
+without them and the compositor comes up perfectly and shows you a black screen
+with no way to open anything, which looks like a failure and is not one.
 
 For a permanent installation, add the flake as an input and enable the module.
 It installs the package, registers the session with the display manager and sets
