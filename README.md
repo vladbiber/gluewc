@@ -223,8 +223,8 @@ horizontal swipe to navigate. Click a window to focus it, or drag it onto the
 left, center or right workspace. Every `Super` binding still works while it is
 up — open a terminal, close a window, switch layouts — and the cards follow;
 `Super+1…9` and the workspace bindings move the overview instead of switching
-underneath it. `start_in_overview = true` (the default) opens the session on
-it. A three-finger horizontal swipe changes the
+underneath it. `start_in_overview = true` opens the session on it.
+A three-finger horizontal swipe changes the
 workspace from the desktop; a three-finger vertical swipe opens or closes the
 overview. `Super+wheel` also changes workspace. In the drift layout three
 fingers pan the canvas and a pinch zooms it, so four fingers take over

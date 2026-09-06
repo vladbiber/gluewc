@@ -20,8 +20,7 @@
   that would switch workspace underneath it move the overview instead. The
   scroll layout's overview arrows no longer drop presses during a transition
   and the card pans smoothly with the strip
-- `start_in_overview` (default true) opens the session straight onto the
-  overview
+- `start_in_overview = true` opens the session straight onto the overview
 - `wm:move_left/right/up/down`, on `Super+Ctrl+Arrow` by default: the window
   trades places with its neighbour in that direction, and when there is none
   left it goes on to the workspace that lies that way (up/down in the scroll

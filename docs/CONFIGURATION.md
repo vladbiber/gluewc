@@ -49,7 +49,7 @@ The same report appears at login when the config was already broken.
 | `animations` | boolean | enable window, workspace and overview animation |
 | `animation_duration` | milliseconds | retile and workspace animation duration |
 | `warp_pointer` | boolean | move the pointer to keyboard-focused windows |
-| `start_in_overview` | boolean | open the session on the overview (default true) |
+| `start_in_overview` | boolean | open the session on the overview (default false) |
 
 ### Opening and closing windows
 

@@ -37,7 +37,7 @@ static float animation_curve_close[4]      = {0.42f, 0.0f, 0.6f, 1.0f};  /* ease
 static float scroll_colfrac                = 0.5f; /* default column width in the niri-style scroll layout */
 static int default_layout                  = LtBSP; /* layout new monitors start in: LtBSP, LtScroll or LtDrift */
 static int remember_layout                 = 1;     /* reopen in the layout the last session ended in */
-static int start_in_overview               = 1;     /* open the session on the overview */
+static int start_in_overview               = 0;     /* open the session on the overview */
 /* drift layout — driftwm-style infinite canvas */
 static int drift_snap                      = 24;    /* edge snapping distance, in canvas pixels */
 static int drift_nudge                     = 20;    /* pixels a window moves per keyboard nudge */
