@@ -328,6 +328,8 @@ client_set_border_color(Client *c, const float color[static 4])
 static inline void
 client_set_border_enabled(Client *c, int enabled)
 {
+	/* a window with nothing on its monitor keeps its frame off too */
+	enabled = enabled && !c->offscreen;
 	if (c->border.top) {
 		wlr_scene_node_set_enabled(&c->border.top->node, enabled);
 		wlr_scene_node_set_enabled(&c->border.bottom->node, enabled);

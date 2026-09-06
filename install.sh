@@ -36,8 +36,9 @@ Usage: install.sh [options]
                    to the rebuild
   --check-config   only list what the defaults gained that your config does
                    not have, and stop
-  --with-bar       also set up glueqs, the quickshell bar built for gluewc,
-                   and start it from the session. Works with --update too
+  --with-bar       also set up glueqs, the quickshell shell built for gluewc
+                   (bar, wallpaper, launcher, OSDs, notifications), and start
+                   it from the session. Works with --update too
   --dry-run        print the package-manager command without running it
   --uninstall      remove gluewc from the selected prefix
   -h, --help       show this help
@@ -212,16 +213,35 @@ config_report() {
 # Ubuntu 26.10+, and lives in the GURU overlay on Gentoo. Older releases and
 # Alpine have nothing, so this is deliberately allowed to fail: the bar's
 # config is set up either way and the note below says where to get the binary.
+# curl fetches the weather, bluetoothctl and nmcli drive the network panel.
+# NetworkManager is not forced on anyone: the panel just stays empty without
+# it. The bar draws the wallpaper itself, so no wallpaper daemon is needed.
 install_bar_package() {
 	[ "$DRY_RUN" -eq 0 ] || return 0
 	case "$FAMILY" in
-	arch)   set -- pacman -S --needed --noconfirm quickshell ;;
-	debian) set -- apt-get install -y quickshell ;;
-	fedora) set -- dnf install -y quickshell ;;
-	void)   set -- xbps-install -Sy quickshell ;;
+	arch)   set -- pacman -S --needed --noconfirm quickshell curl bluez-utils ;;
+	debian) set -- apt-get install -y quickshell curl bluez ;;
+	fedora) set -- dnf install -y quickshell curl bluez ;;
+	void)   set -- xbps-install -Sy quickshell curl bluez ;;
+	alpine) set -- apk add curl bluez ;;
+	gentoo) set -- emerge --noreplace --ask=n net-misc/curl net-wireless/bluez ;;
+	suse)   set -- zypper --non-interactive install curl bluez ;;
 	*)      return 0 ;;
 	esac
-	run_root "$@" || warn "could not install quickshell from the package manager"
+	run_root "$@" || warn "could not install the bar's packages from the package manager"
+}
+
+# The bar is written against upstream Quickshell (0.2 or newer). A fork that
+# carries extra modules works too, but a Quickshell that is too old does not,
+# and the error it prints then ("module not installed") is not obvious.
+check_bar_runtime() {
+	qs=$(command -v qs 2>/dev/null || command -v quickshell 2>/dev/null) || return 0
+	ver=$("$qs" --version 2>/dev/null | head -n1)
+	case "$ver" in
+	*" 0.0."*|*" 0.1."*)
+		warn "$ver is older than the bar needs (Quickshell 0.2+); update it"
+		;;
+	esac
 }
 
 install_bar() {
@@ -259,6 +279,14 @@ install_bar() {
 		warn "quickshell is not installed and your distribution does not package it"
 		warn "get it from https://quickshell.outfoxxed.me — the bar is configured"
 		warn "already and starts as soon as the binary is on PATH"
+	else
+		check_bar_runtime
+	fi
+	# the bar draws the wallpaper itself now; a wallpaper daemon left in the
+	# autostart would paint over it
+	if [ -r "$USER_CONFIG" ] && grep -qE '^[[:space:]]*autostart[[:space:]]*=[[:space:]]*(swww-daemon|waypaper|swaybg)' "$USER_CONFIG"; then
+		warn "$USER_CONFIG still starts a wallpaper daemon (swww/waypaper/swaybg);"
+		warn "glueqs sets the wallpaper itself, so remove that autostart line"
 	fi
 }
 
@@ -298,6 +326,7 @@ fi
 if [ "$UNINSTALL" -eq 1 ]; then
 	log "Removing gluewc"
 	run_install rm -f "$DESTDIR$PREFIX/bin/gluewc" "$DESTDIR$PREFIX/bin/gluewc-session" \
+		"$DESTDIR$PREFIX/bin/gluewc-msg" \
 		"$DESTDIR$PREFIX/share/man/man1/gluewc.1" \
 		"$DESTDIR$PREFIX/share/gluewc/config.def.conf" \
 		"$DESTDIR$SESSIONDIR/gluewc.desktop"
@@ -443,15 +472,19 @@ EOF
 # playerctl drives the media keys and the backlight keys need brightnessctl,
 # or light, which is what ::gentoo carries. Without them those keys do
 # nothing, so they are installed alongside the compositor.
+# The desktop portal and its wlroots backend are what give sandboxed and
+# Electron apps their file dialogs and screen sharing; without them Discord
+# cannot share a screen and a Flatpak cannot open a file. They are installed
+# with the rest of the session.
 session_packages() {
 	case "$1" in
-	arch)   printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
-	debian) printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
-	fedora) printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
-	suse)   printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
-	gentoo) printf 'gui-apps/grim gui-apps/slurp gui-apps/wl-clipboard media-sound/playerctl dev-libs/light' ;;
-	alpine) printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
-	void)   printf 'grim slurp wl-clipboard playerctl brightnessctl' ;;
+	arch)   printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
+	debian) printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
+	fedora) printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
+	suse)   printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
+	gentoo) printf 'gui-apps/grim gui-apps/slurp gui-apps/wl-clipboard media-sound/playerctl dev-libs/light sys-apps/xdg-desktop-portal gui-libs/xdg-desktop-portal-wlr' ;;
+	alpine) printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
+	void)   printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
 	esac
 }
 
@@ -609,6 +642,30 @@ enable_audio() {
 		|| warn "could not enable the PipeWire user units; gluewc-session starts them at login instead"
 }
 
+# WirePlumber's default of switching Bluetooth headphones to the headset
+# profile the moment any app opens the microphone is the classic "Discord
+# broke my sound": the music drops to mono telephone quality and stays there.
+# Keeping the headphones on their A2DP profile is written as a user-level
+# drop-in, only when there is none already, so it is trivially reversible.
+stable_audio_config() {
+	[ "$WITH_AUDIO" -eq 1 ] || return 0
+	[ "$(id -u)" -ne 0 ] || return 0
+	dir=${XDG_CONFIG_HOME:-$HOME/.config}/wireplumber/wireplumber.conf.d
+	file=$dir/50-gluewc-stable-audio.conf
+	[ -e "$file" ] && return 0
+	mkdir -p "$dir"
+	cat >"$file" <<'CONF'
+# Written by gluewc's install.sh. Delete this file to go back to the defaults.
+# Do not drop Bluetooth headphones to the headset (HSP/HFP) profile whenever an
+# application opens the microphone: it turns the music into mono telephone
+# audio and it rarely switches back on its own.
+wireplumber.settings = {
+  bluetooth.autoswitch-to-headset-profile = false
+}
+CONF
+	log "Wrote $file (keeps Bluetooth audio on its music profile)"
+}
+
 if [ "$WITH_DEPS" -eq 1 ]; then
 	if [ "$FAMILY" = nixos ] || [ "$FAMILY" = finix ]; then
 		: # install_packages prints the flake instructions and stops
@@ -623,6 +680,7 @@ if [ "$WITH_DEPS" -eq 1 ]; then
 		exit 0
 	fi
 	enable_audio
+	stable_audio_config
 fi
 
 for tool in cc make git meson ninja pkg-config; do

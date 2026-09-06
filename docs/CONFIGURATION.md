@@ -49,6 +49,7 @@ The same report appears at login when the config was already broken.
 | `animations` | boolean | enable window, workspace and overview animation |
 | `animation_duration` | milliseconds | retile and workspace animation duration |
 | `warp_pointer` | boolean | move the pointer to keyboard-focused windows |
+| `start_in_overview` | boolean | open the session on the overview (default true) |
 
 ### Opening and closing windows
 
@@ -117,13 +118,14 @@ Every `autostart` line is started through `/bin/sh -c`:
 
 ```ini
 autostart = waybar
-autostart = swww-daemon
-autostart = swww img ~/Pictures/wallpaper.jpg
+autostart = swaybg -i ~/Pictures/wallpaper.jpg -m fill
 ```
 
 Wallpaper programs should use a background or bottom layer-shell surface.
-gluewc copies those layers into the overview. If none is running, `root_color`
-is shown.
+gluewc copies those layers into the overview, and a wallpaper that changes
+while the overview is up changes in the cards too. If none is running,
+`root_color` is shown. glueqs paints the wallpaper itself, so with it there
+is no wallpaper line at all.
 
 ## Keybind syntax
 
@@ -155,7 +157,8 @@ Actions:
 | `wm:toggle_split` | change the focused BSP split direction; in the scroll layout, maximize the column |
 | `wm:toggle_layout` | cycle the monitor through BSP, scroll and drift |
 | `wm:layout:bsp`, `wm:layout:scroll`, `wm:layout:drift` | select a layout directly |
-| `wm:move_to_workspace_left/right/up/down` | take the window along to the workspace that way, on the axis the layout puts workspaces on |
+| `wm:move_left/right/up/down` | move the window that way: trade places with the neighbour in that direction, and when there is none left go on to the workspace that lies that way (up/down in the scroll layout, left/right elsewhere) |
+| `wm:move_to_workspace_left/right/up/down` | only the second half of that: take the window along to the workspace that way, on the axis the layout puts workspaces on |
 | `wm:pan_left/right/up/down` | drift: pan the camera; swaps windows in the other layouts |
 | `wm:zoom_in`, `wm:zoom_out`, `wm:zoom_reset` | drift: camera zoom around the viewport centre |
 | `wm:zoom_fit` | drift: zoom to fit every window on the workspace |
@@ -202,7 +205,17 @@ software boost above it.
 ## Overview and gestures
 
 - Tap and release `Super` without another key to toggle the overview.
-- Arrow keys and workspace numbers navigate while it is open.
+  `start_in_overview` opens the session on it.
+- Arrow keys and workspace numbers navigate while it is open. Every binding
+  with a modifier keeps working: a terminal opens, a window closes, the layout
+  cycles, and the cards follow. Bindings that would switch workspace
+  underneath it (`wm:workspace:N`, `wm:workspace_prev/next`, the arrows) move
+  the overview instead.
+- The cards are live: the windows keep painting and every commit redraws the
+  card it belongs to, so a video plays inside its card.
+- Nothing crosses a monitor edge: cards, windows sliding between workspaces,
+  the strip's off-screen columns and the drift canvas are all cut at the
+  monitor they belong to.
 - The mouse wheel changes workspace in the overview.
 - A two-finger horizontal overview swipe changes workspace.
 - Scroll layout: three-finger vertical swipes change workspace and horizontal

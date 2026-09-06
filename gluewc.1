@@ -68,6 +68,9 @@ Start rofi in application mode.
 Select workspace 1 through 9.
 .It Mod-Ctrl-[1-9]
 Move the focused window to a workspace and follow it.
+.It Mod-Ctrl-Arrow
+Move the focused window that way: swap with its neighbour, or on to the next
+workspace in that direction when there is none.
 .It Mod-Arrow , Mod-[h/j/k/l]
 Focus directionally.
 Crossing the horizontal edge selects the adjacent
@@ -143,10 +146,14 @@ Toggle floating.
 Resize the focused window; tiled windows become floating.
 .El
 .Sh OVERVIEW AND GESTURES
-The overview shows the current workspace and its two neighbors.
+The overview shows the current workspace and its two neighbors, live.
 Use arrows,
 workspace numbers, the wheel or a two-finger horizontal swipe to navigate.
 Click a window to focus it or drag it between workspace cards.
+Bindings with a modifier keep working while it is up.
+The session opens on the overview unless
+.Ic start_in_overview = false
+is set.
 .Pp
 A three-finger horizontal swipe changes workspace.
 A three-finger upward swipe opens the overview and a downward swipe closes it.

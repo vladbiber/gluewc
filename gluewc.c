@@ -203,6 +203,7 @@ struct Client {
 	uint32_t resize; /* configure serial of a pending resize */
 	uint32_t resizeat; /* when that serial was sent, in ms */
 	double bufscale; /* scale painted on this client's buffers, 1 = untouched */
+	int offscreen; /* nothing of it lies on its monitor, so it is not drawn */
 };
 
 typedef struct {
@@ -331,6 +332,7 @@ typedef struct {
 	struct wlr_scene_tree *tree;
 	float scalex, scaley, opacity;
 	int srcx, srcy, x, y, radius, count;
+	struct wlr_box clip; /* the monitor: nothing is drawn past its edge */
 } OverviewClone;
 
 typedef struct {
@@ -376,7 +378,12 @@ static void bsp_tile(Node *n, struct wlr_box box);
 static void buttonpress(struct wl_listener *listener, void *data);
 static void chvt(const Arg *arg);
 static void checkidleinhibitor(struct wlr_surface *exclude);
-static void clientborders(Client *c, int width, int height, int bw, int radius);
+static void clientborders(Client *c, int width, int height, int bw, int radius,
+		const struct wlr_box *crop);
+static void clientclip(Client *c);
+static void clientplace(Client *c, int x, int y);
+static int borderwanted(Client *c);
+static int boxclip(struct wlr_box *b, const struct wlr_box *clip);
 static float clientopacity(Client *c);
 static void clientscale(Client *c, float z);
 static void clientunscale(Client *c);
@@ -481,14 +488,18 @@ static void moveresize(const Arg *arg);
 static void movetowsfollow(const Arg *arg);
 static void childdie(const char *what, const char *cmd);
 static void movewsdir(const Arg *arg);
+static void movedir(const Arg *arg);
 static void movewsstep(const Arg *arg);
 static void outputmgrapply(struct wl_listener *listener, void *data);
 static void outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test);
 static void outputmgrtest(struct wl_listener *listener, void *data);
 static void overviewbuild(void);
+static void overviewtouch(Client *c);
+static void overviewframes(Monitor *m, struct timespec *now);
 static void overviewbutton(struct wlr_pointer_button_event *event);
 static void overviewclone(struct wlr_scene_buffer *buffer, int sx, int sy, void *data);
 static int overviewkey(xkb_keysym_t sym);
+static int overviewkeybinding(uint32_t mods, xkb_keysym_t sym);
 static int overviewmotion(void);
 static void overviewnavigate(unsigned int ws, int dir);
 static void overviewrelayout(void);
@@ -498,6 +509,7 @@ static int overviewpassthrough(void);
 static int overviewkeypassthrough(void);
 static void saveoverviewstate(int active);
 static void overviewtoggle(const Arg *arg);
+static int startoverview(void *data);
 static int overviewvalid(Monitor *m);
 static void workspacestep(int dir);
 static void workspacestepcarry(int dir, int carry);
@@ -543,6 +555,7 @@ static void setfloating(Client *c, int floating);
 static void setfullscreen(Client *c, int fullscreen);
 static void setlayout(Monitor *m, unsigned int lt);
 static int layoutstatepath(char *buf, size_t size);
+static const char *layoutname(unsigned int lt);
 static void loadlayoutstate(void);
 static void savelayoutstate(unsigned int lt);
 static void setlayoutarg(const Arg *arg);
@@ -611,6 +624,7 @@ static struct wlr_scene_tree *overview_drag_scene;
 static struct wl_list close_anims;
 static int overview_active;
 static int overview_visible;
+static int overview_dirty; /* a window changed under the overview: rebuild */
 static struct wl_event_source *overview_watchdog;
 /* config file watch: the file is reloaded as soon as an editor closes it, and
  * anything the parser rejected is reported instead of only reaching the log */
@@ -853,8 +867,32 @@ clientopacity(Client *c)
 	return win_opacity;
 }
 
+int
+boxclip(struct wlr_box *b, const struct wlr_box *clip)
+{
+	/* shrink b to the part inside clip; 0 when nothing is left */
+	return wlr_box_intersection(b, b, clip) && !wlr_box_empty(b);
+}
+
+/* place a frame piece, cut down to the part of it inside crop (frame-relative,
+ * NULL for none); a piece left with nothing is parked at zero size */
+static void
+rectplace(struct wlr_scene_rect *rect, int x, int y, int w, int h,
+		const struct wlr_box *crop)
+{
+	struct wlr_box b = {x, y, w, h};
+
+	if (crop && !boxclip(&b, crop)) {
+		wlr_scene_rect_set_size(rect, 0, 0);
+		return;
+	}
+	wlr_scene_rect_set_size(rect, b.width, b.height);
+	wlr_scene_node_set_position(&rect->node, b.x, b.y);
+}
+
 void
-clientborders(Client *c, int width, int height, int bw, int radius)
+clientborders(Client *c, int width, int height, int bw, int radius,
+		const struct wlr_box *crop)
 {
 	/* the four edges are square and the corners carry the radius, so a
 	 * transparent client keeps a real rounded outline */
@@ -865,35 +903,122 @@ clientborders(Client *c, int width, int height, int bw, int radius)
 	horizontal = MAX(0, width - 2 * radius);
 	vertical = MAX(0, height - 2 * radius);
 
-	wlr_scene_rect_set_size(c->border.top, horizontal, bw);
-	wlr_scene_node_set_position(&c->border.top->node, radius, 0);
-	wlr_scene_rect_set_size(c->border.bottom, horizontal, bw);
-	wlr_scene_node_set_position(&c->border.bottom->node, radius,
-			MAX(0, height - bw));
-	wlr_scene_rect_set_size(c->border.left, bw, vertical);
-	wlr_scene_node_set_position(&c->border.left->node, 0, radius);
-	wlr_scene_rect_set_size(c->border.right, bw, vertical);
-	wlr_scene_node_set_position(&c->border.right->node,
-			MAX(0, width - bw), radius);
+	rectplace(c->border.top, radius, 0, horizontal, bw, crop);
+	rectplace(c->border.bottom, radius, MAX(0, height - bw), horizontal, bw, crop);
+	rectplace(c->border.left, 0, radius, bw, vertical, crop);
+	rectplace(c->border.right, MAX(0, width - bw), radius, bw, vertical, crop);
 
-	wlr_scene_rect_set_size(c->border.top_left, radius, radius);
-	wlr_scene_node_set_position(&c->border.top_left->node, 0, 0);
-	wlr_scene_rect_set_size(c->border.top_right, radius, radius);
-	wlr_scene_node_set_position(&c->border.top_right->node,
-			MAX(0, width - radius), 0);
-	wlr_scene_rect_set_size(c->border.bottom_right, radius, radius);
-	wlr_scene_node_set_position(&c->border.bottom_right->node,
-			MAX(0, width - radius), MAX(0, height - radius));
-	wlr_scene_rect_set_size(c->border.bottom_left, radius, radius);
-	wlr_scene_node_set_position(&c->border.bottom_left->node, 0,
-			MAX(0, height - radius));
+	rectplace(c->border.top_left, 0, 0, radius, radius, crop);
+	rectplace(c->border.top_right, MAX(0, width - radius), 0, radius, radius, crop);
+	rectplace(c->border.bottom_right, MAX(0, width - radius),
+			MAX(0, height - radius), radius, radius, crop);
+	rectplace(c->border.bottom_left, 0, MAX(0, height - radius),
+			radius, radius, crop);
 
 	if (c->blur) {
-		wlr_scene_blur_set_size(c->blur, MAX(0, width - 2 * bw),
-				MAX(0, height - 2 * bw));
+		struct wlr_box b = {bw, bw, MAX(0, width - 2 * bw), MAX(0, height - 2 * bw)};
+		if (crop && !boxclip(&b, crop))
+			b.width = b.height = 0;
+		wlr_scene_blur_set_size(c->blur, b.width, b.height);
 		wlr_scene_blur_set_corner_radius(c->blur, MAX(0, radius - bw));
-		wlr_scene_node_set_position(&c->blur->node, bw, bw);
+		wlr_scene_node_set_position(&c->blur->node, b.x, b.y);
 	}
+}
+
+int
+borderwanted(Client *c)
+{
+	/* the frame the focus state asks for, before the monitor crop */
+	return !decorhidden && !c->isfullscreen && !c->isfakefull
+			&& (unfocused_borders
+				|| client_surface(c) == seat->keyboard_state.focused_surface);
+}
+
+/* the crop box of c's monitor, relative to the client's scene tree */
+static void
+clientcropbox(Client *c, struct wlr_box *crop)
+{
+	*crop = (struct wlr_box){
+		.x = c->mon->m.x - c->scene->node.x,
+		.y = c->mon->m.y - c->scene->node.y,
+		.width = c->mon->m.width, .height = c->mon->m.height,
+	};
+}
+
+static void
+clientoffscreen(Client *c, int off)
+{
+	off = !!off;
+	if (c->offscreen == off)
+		return;
+	c->offscreen = off;
+	if (c->scene_surface)
+		wlr_scene_node_set_enabled(&c->scene_surface->node, !off);
+	client_set_border_enabled(c, !off && borderwanted(c));
+	if (c->blur)
+		wlr_scene_node_set_enabled(&c->blur->node, !off && blurenabled
+				&& !c->isfullscreen && !c->isfakefull);
+}
+
+/* Everything a window paints stays on its own monitor.  The scroll strip and
+ * the drift canvas legitimately hang past the edge, a workspace slide starts
+ * a whole screen away and a retile can cross it for a few frames; without
+ * this the overhang is drawn on whichever output sits next door. */
+void
+clientclip(Client *c)
+{
+	struct wlr_box clip, crop, vis;
+	int bw, sx1, sy1, sx2, sy2, r;
+
+	if (!c->mon || !c->scene || !c->scene_surface
+			|| !client_surface(c)->mapped || client_is_unmanaged(c))
+		return;
+	/* the scaled paths (camera zoom, open animation) crop for themselves */
+	if (c->bufscale != 1.0 || (c->anim.scale > 0.0f && c->anim.scale < 1.0f))
+		return;
+	bw = (int)c->bw;
+	clientcropbox(c, &crop);
+	vis = (struct wlr_box){0, 0, c->geom.width, c->geom.height};
+	if (!boxclip(&vis, &crop)) {
+		clientoffscreen(c, 1);
+		return;
+	}
+	clientoffscreen(c, 0);
+
+	client_get_clip(c, &clip);
+	if (DRIFTLT(c->mon) && c->oncanvas && !c->isfloating
+			&& !c->isfullscreen && !c->isfakefull) {
+		clip.width = MAX(1, c->canvas.width - 2 * bw);
+		clip.height = MAX(1, c->canvas.height - 2 * bw);
+	}
+	/* the surface sits at (bw, bw) in the frame; keep the part of it that
+	 * the visible box covers.  The clip is in surface coordinates and does
+	 * not move anything: wlroots parks the cropped buffer at the clip's
+	 * own origin, so the tree stays where it is and the cut lands right. */
+	sx1 = MAX(bw, vis.x);
+	sy1 = MAX(bw, vis.y);
+	sx2 = MIN(bw + clip.width, vis.x + vis.width);
+	sy2 = MIN(bw + clip.height, vis.y + vis.height);
+	if (sx2 <= sx1 || sy2 <= sy1) {
+		wlr_scene_node_set_enabled(&c->scene_surface->node, 0);
+	} else {
+		clip.x += sx1 - bw;
+		clip.y += sy1 - bw;
+		clip.width = sx2 - sx1;
+		clip.height = sy2 - sy1;
+		wlr_scene_node_set_enabled(&c->scene_surface->node, 1);
+		wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+	}
+	r = (c->isfullscreen || c->isfakefull) ? 0
+			: MIN(MAX(0, corner_radius), MIN(c->geom.width, c->geom.height) / 2);
+	clientborders(c, c->geom.width, c->geom.height, bw, r, &vis);
+}
+
+void
+clientplace(Client *c, int x, int y)
+{
+	wlr_scene_node_set_position(&c->scene->node, x, y);
+	clientclip(c);
 }
 
 /* SceneFX 0.5 keeps the backdrop blur in a node of its own that is masked by
@@ -944,7 +1069,8 @@ applyeffects(Client *c)
 		/* masking the blur with the surface keeps it inside the parts the
 		 * client actually paints, the way ignore_transparent used to */
 		wlr_scene_blur_set_transparency_mask_source(c->blur, c->surfbuf);
-		wlr_scene_node_set_enabled(&c->blur->node, blurenabled && !fs);
+		wlr_scene_node_set_enabled(&c->blur->node, blurenabled && !fs
+				&& !c->offscreen);
 	}
 }
 
@@ -1287,6 +1413,8 @@ arrange(Monitor *m)
 	motionnotify(0, NULL, 0, 0, 0, 0);
 	checkidleinhibitor(NULL);
 	ipcnotifyall();
+	if (overview_visible)
+		overview_dirty = 1;
 }
 
 void
@@ -2772,6 +2900,7 @@ typedef struct {
 	double z;
 	int ox, oy;          /* where the clip origin lands on screen */
 	struct wlr_box clip; /* unscaled, in surface-local coordinates */
+	const struct wlr_box *crop; /* monitor box in the same space as ox/oy */
 } DriftScale;
 
 static void
@@ -2821,6 +2950,7 @@ driftscalebuf(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 {
 	DriftScale *ds = data;
 	struct wlr_scene_surface *s = wlr_scene_surface_try_from_buffer(buffer);
+	struct wlr_box dst, vis;
 	int i, x1, y1, x2, y2, tx, ty;
 
 	if (!s)
@@ -2845,19 +2975,47 @@ driftscalebuf(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 		return;
 	tx = ds->ox + (int)round((x1 - ds->clip.x) * ds->z);
 	ty = ds->oy + (int)round((y1 - ds->clip.y) * ds->z);
-	wlr_scene_buffer_set_dest_size(buffer,
-			MAX(1, (int)round((x2 - x1) * ds->z)),
-			MAX(1, (int)round((y2 - y1) * ds->z)));
+	dst = (struct wlr_box){tx, ty, MAX(1, (int)round((x2 - x1) * ds->z)),
+			MAX(1, (int)round((y2 - y1) * ds->z))};
+	vis = dst;
+	if (ds->crop && !boxclip(&vis, ds->crop)) {
+		/* entirely past the monitor edge; wlroots re-enables it on the
+		 * next map, and the next pass does when it comes back */
+		wlr_scene_node_set_enabled(&buffer->node, 0);
+		return;
+	}
+	wlr_scene_node_set_enabled(&buffer->node, 1);
+	if (vis.x != dst.x || vis.y != dst.y || vis.width != dst.width
+			|| vis.height != dst.height) {
+		/* only the visible part is drawn: pick that part of the buffer
+		 * and shrink the destination to match */
+		struct wlr_fbox src;
+		double bx = buffer->buffer ? (double)buffer->buffer->width
+				/ MAX(1, s->surface->current.width) : 1.0;
+		double by = buffer->buffer ? (double)buffer->buffer->height
+				/ MAX(1, s->surface->current.height) : 1.0;
+		src.x = (x1 - ds->list[i].x + (vis.x - dst.x) / ds->z) * bx;
+		src.y = (y1 - ds->list[i].y + (vis.y - dst.y) / ds->z) * by;
+		src.width = vis.width / ds->z * bx;
+		src.height = vis.height / ds->z * by;
+		wlr_scene_buffer_set_source_box(buffer, &src);
+	} else {
+		/* back to what the surface state says, in case a crop was set */
+		wlr_scene_buffer_set_source_box(buffer, NULL);
+	}
+	wlr_scene_buffer_set_dest_size(buffer, vis.width, vis.height);
 	wlr_scene_buffer_set_filter_mode(buffer, WLR_SCALE_FILTER_BILINEAR);
 	wlr_scene_node_set_position(&buffer->node,
-			buffer->node.x + tx - sx, buffer->node.y + ty - sy);
+			buffer->node.x + vis.x - sx, buffer->node.y + vis.y - sy);
 }
 
 static void
 driftscalesurface(struct wlr_scene_tree *tree, struct wlr_surface *surface,
-		double z, int ox, int oy, const struct wlr_box *clip)
+		double z, int ox, int oy, const struct wlr_box *clip,
+		const struct wlr_box *crop)
 {
-	DriftScale ds = {.n = 0, .z = z, .ox = ox, .oy = oy, .clip = *clip};
+	DriftScale ds = {.n = 0, .z = z, .ox = ox, .oy = oy, .clip = *clip,
+		.crop = crop};
 
 	wlr_surface_for_each_surface(surface, driftcollect, &ds);
 	wlr_scene_node_for_each_buffer(&tree->node, driftscalebuf, &ds);
@@ -2885,7 +3043,7 @@ driftscalepopups(struct wl_list *popups, double z, int ox, int oy)
 		tx = ox + (int)round(p->current.geometry.x * z);
 		ty = oy + (int)round(p->current.geometry.y * z);
 		wlr_scene_node_set_position(&tree->node, tx, ty);
-		driftscalesurface(tree, p->base->surface, z, tx, ty, &clip);
+		driftscalesurface(tree, p->base->surface, z, tx, ty, &clip, NULL);
 		driftscalepopups(&p->base->popups, z, 0, 0);
 	}
 }
@@ -2896,8 +3054,8 @@ driftscaleclient(Client *c, double z)
 	/* wlr_scene_node_for_each_buffer() counts from the parent of the node it
 	 * is given, so everything here is relative to the client's scene tree —
 	 * which also keeps the open and retile animations working */
-	struct wlr_box clip;
-	int bw = (int)c->bw;
+	struct wlr_box clip, crop, vis;
+	int bw = (int)c->bw, r;
 
 	if (!c->scene || !c->scene_surface || !client_surface(c)->mapped)
 		return;
@@ -2906,7 +3064,18 @@ driftscaleclient(Client *c, double z)
 	clip.width = MAX(1, c->canvas.width - 2 * bw);
 	clip.height = MAX(1, c->canvas.height - 2 * bw);
 	c->bufscale = z;
-	driftscalesurface(c->scene_surface, client_surface(c), z, bw, bw, &clip);
+	clientcropbox(c, &crop);
+	vis = (struct wlr_box){0, 0, c->geom.width, c->geom.height};
+	if (!boxclip(&vis, &crop)) {
+		clientoffscreen(c, 1);
+		return;
+	}
+	clientoffscreen(c, 0);
+	r = (c->isfullscreen || c->isfakefull) ? 0
+			: MIN(MAX(0, corner_radius), MIN(c->geom.width, c->geom.height) / 2);
+	clientborders(c, c->geom.width, c->geom.height, bw, r, &vis);
+	driftscalesurface(c->scene_surface, client_surface(c), z, bw, bw, &clip,
+			&crop);
 #ifdef XWAYLAND
 	if (c->type != XDGShell)
 		return;
@@ -2923,7 +3092,7 @@ clientscale(Client *c, float z)
 {
 	/* popups are left alone: a window that just mapped has none, and one
 	 * that shows up mid-animation is better placed than half scaled */
-	struct wlr_box clip;
+	struct wlr_box clip, crop, vis;
 	int bw, w, h, r;
 
 	if (!c->scene || !c->scene_surface || !client_surface(c)->mapped)
@@ -2937,11 +3106,19 @@ clientscale(Client *c, float z)
 	h = MAX(1 + 2 * bw, (int)roundf(c->geom.height * z));
 	r = (c->isfullscreen || c->isfakefull) ? 0
 			: MIN(MAX(0, (int)roundf(corner_radius * z)), MIN(w, h) / 2);
-	clientborders(c, w, h, bw, r);
-	client_get_clip(c, &clip);
-	driftscalesurface(c->scene_surface, client_surface(c), z, bw, bw, &clip);
 	c->anim.scale = z;
 	c->bufscale = z;
+	clientcropbox(c, &crop);
+	vis = (struct wlr_box){0, 0, w, h};
+	if (!boxclip(&vis, &crop)) {
+		clientoffscreen(c, 1);
+		return;
+	}
+	clientoffscreen(c, 0);
+	clientborders(c, w, h, bw, r, &vis);
+	client_get_clip(c, &clip);
+	driftscalesurface(c->scene_surface, client_surface(c), z, bw, bw, &clip,
+			&crop);
 }
 
 void
@@ -2961,9 +3138,11 @@ clientunscale(Client *c)
 	r = (c->isfullscreen || c->isfakefull) ? 0
 			: MIN(MAX(0, corner_radius),
 					MIN(c->geom.width, c->geom.height) / 2);
-	clientborders(c, c->geom.width, c->geom.height, bw, r);
+	clientborders(c, c->geom.width, c->geom.height, bw, r, NULL);
 	client_get_clip(c, &clip);
-	driftscalesurface(c->scene_surface, client_surface(c), 1.0, bw, bw, &clip);
+	driftscalesurface(c->scene_surface, client_surface(c), 1.0, bw, bw, &clip,
+			NULL);
+	clientclip(c);
 }
 
 void
@@ -3408,6 +3587,12 @@ commitlayersurfacenotify(struct wl_listener *listener, void *data)
 	arrangelayers(l->mon);
 	if (!wasmapped && l->mapped)
 		layeranimstart(l);
+	/* the cards carry the wallpaper, so a new one shows up in them too */
+	if (overview_visible && layer_surface->current.layer
+			== ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND) {
+		overview_dirty = 1;
+		wlr_output_schedule_frame(l->mon->wlr_output);
+	}
 }
 
 void
@@ -3471,6 +3656,7 @@ commitnotify(struct wl_listener *listener, void *data)
 	/* mark a pending resize as completed */
 	if (c->resize && c->resize <= c->surface.xdg->current.configure_serial)
 		c->resize = 0;
+	overviewtouch(c);
 }
 
 static void
@@ -4505,12 +4691,49 @@ ipcstatus(IpcOutput *io)
 	zdwl_ipc_output_v2_send_frame(io->resource);
 }
 
+/* The same picture the dwl-ipc bars get, as a file any shell can watch:
+ * one line per output, "name active workspace count,count,... layout".
+ * Workspaces and counts are 1-based on the wire and 0-based here. */
+static void
+saveworkspacestate(void)
+{
+	char path[600], dir[512];
+	Monitor *m;
+	Client *c;
+	FILE *f;
+
+	if (!layoutstatepath(dir, sizeof dir))
+		return;
+	mkdir(dir, 0700);
+	snprintf(path, sizeof path, "%s/workspaces", dir);
+	/* written in place, like the overview file: a rename would swap the
+	 * inode out from under a file watcher and it would stop noticing */
+	if (!(f = fopen(path, "w")))
+		return;
+	wl_list_for_each(m, &mons, link) {
+		uint32_t wscnt[NUMWS] = {0};
+		int i;
+		if (!m->wlr_output->enabled)
+			continue;
+		wl_list_for_each(c, &clients, link) {
+			if (c->mon == m && c->ws < NUMWS && !client_is_unmanaged(c))
+				wscnt[c->ws]++;
+		}
+		fprintf(f, "%s %d %u ", m->wlr_output->name, m == selmon, m->ws);
+		for (i = 0; i < NUMWS; i++)
+			fprintf(f, "%s%u", i ? "," : "", wscnt[i]);
+		fprintf(f, " %s\n", layoutname(m->lt));
+	}
+	fclose(f);
+}
+
 void
 ipcnotifyall(void)
 {
 	IpcOutput *io;
 	wl_list_for_each(io, &ipc_outputs, link)
 		ipcstatus(io);
+	saveworkspacestate();
 }
 
 static void
@@ -4557,6 +4780,87 @@ ipcmgrbind(struct wl_client *client, void *data, uint32_t version, uint32_t id)
 }
 /* --- end dwl-ipc --- */
 
+/* the corners a box keeps once it is cut down to vis: a cut side goes square */
+static struct fx_corner_radii
+cutradii(struct fx_corner_radii r, const struct wlr_box *full,
+		const struct wlr_box *vis)
+{
+	int l = vis->x > full->x, t = vis->y > full->y;
+	int rt = vis->x + vis->width < full->x + full->width;
+	int b = vis->y + vis->height < full->y + full->height;
+
+	return corner_radii_new(l || t ? 0 : r.top_left, rt || t ? 0 : r.top_right,
+			rt || b ? 0 : r.bottom_right, l || b ? 0 : r.bottom_left);
+}
+
+/* a rounded rect of the overview, cut to the monitor it belongs to */
+static struct wlr_scene_rect *
+overviewrect(struct wlr_scene_tree *tree, struct wlr_box box, int radius,
+		const float color[static 4], const struct wlr_box *clip)
+{
+	struct wlr_box vis = box;
+	struct wlr_scene_rect *rect;
+
+	if (!boxclip(&vis, clip))
+		return NULL;
+	rect = wlr_scene_rect_create(tree, vis.width, vis.height, color);
+	wlr_scene_rect_set_corner_radii(rect,
+			cutradii(corner_radii_all(radius), &box, &vis));
+	wlr_scene_node_set_position(&rect->node, vis.x, vis.y);
+	return rect;
+}
+
+/* the shadow is hidden under its panel except for the few pixels it hangs
+ * out by, so cutting it square at the edge shows nothing */
+static void
+overviewshadow(struct wlr_scene_tree *tree, struct wlr_box box, int radius,
+		float sigma, const float color[static 4], const struct wlr_box *clip)
+{
+	struct wlr_box vis = box;
+	struct wlr_scene_shadow *shadow;
+
+	if (!boxclip(&vis, clip))
+		return;
+	shadow = wlr_scene_shadow_create(tree, vis.width, vis.height, radius,
+			sigma, color);
+	wlr_scene_node_set_position(&shadow->node, vis.x, vis.y);
+}
+
+/* The overview shows the windows themselves, not a snapshot: whenever one
+ * of them paints, its card is rebuilt on the next frame. */
+static void
+overviewtouch(Client *c)
+{
+	if (!overview_visible || !c || !c->mon)
+		return;
+	overview_dirty = 1;
+	wlr_output_schedule_frame(c->mon->wlr_output);
+}
+
+static void
+overviewframedone(struct wlr_surface *surface, int sx, int sy, void *data)
+{
+	wlr_surface_send_frame_done(surface, data);
+}
+
+/* The tiling layers are switched off while the overview is up, and wlroots
+ * only sends frame callbacks to what it draws, so the windows would stop
+ * painting: a video freezes, a terminal stops scrolling.  Tell them a frame
+ * went by ourselves. */
+static void
+overviewframes(Monitor *m, struct timespec *now)
+{
+	Client *c;
+
+	if (!overview_visible)
+		return;
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon == m && VISIBLEON(c, m) && client_surface(c)->mapped)
+			wlr_surface_for_each_surface(client_surface(c),
+					overviewframedone, now);
+	}
+}
+
 static void
 overviewclear(void)
 {
@@ -4584,6 +4888,7 @@ overviewclone(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 	struct wlr_scene_buffer *clone;
 	struct wlr_scene_buffer_set_buffer_options options;
 	struct fx_corner_radii corners;
+	struct wlr_box dst, vis;
 	float scale;
 	int width, height, dstw, dsth;
 
@@ -4618,11 +4923,38 @@ overviewclone(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 				(int)roundf(buffer->corners.top_right * scale),
 				(int)roundf(buffer->corners.bottom_right * scale),
 				(int)roundf(buffer->corners.bottom_left * scale));
+	dst = (struct wlr_box){
+		oc->x + (int)roundf((sx - oc->srcx) * oc->scalex),
+		oc->y + (int)roundf((sy - oc->srcy) * oc->scaley), dstw, dsth};
+	vis = dst;
+	if (!boxclip(&vis, &oc->clip)) {
+		wlr_scene_node_destroy(&clone->node);
+		return;
+	}
+	if (vis.x != dst.x || vis.y != dst.y || vis.width != dst.width
+			|| vis.height != dst.height) {
+		/* a panel sliding in from past the edge: draw the part of the
+		 * buffer that is on this monitor, and only that */
+		struct wlr_fbox src = buffer->src_box;
+		double fx, fy;
+		if (src.width <= 0 || src.height <= 0)
+			src = (struct wlr_fbox){0, 0, buffer->buffer->width,
+					buffer->buffer->height};
+		fx = src.width / dst.width;
+		fy = src.height / dst.height;
+		src.x += (vis.x - dst.x) * fx;
+		src.y += (vis.y - dst.y) * fy;
+		src.width = vis.width * fx;
+		src.height = vis.height * fy;
+		wlr_scene_buffer_set_source_box(clone, &src);
+		corners = cutradii(corners, &dst, &vis);
+		dstw = vis.width;
+		dsth = vis.height;
+		wlr_scene_buffer_set_dest_size(clone, dstw, dsth);
+	}
 	wlr_scene_buffer_set_corner_radii(clone, corners);
 	wlr_scene_buffer_set_opaque_region(clone, &buffer->opaque_region);
-	wlr_scene_node_set_position(&clone->node,
-			oc->x + (int)roundf((sx - oc->srcx) * oc->scalex),
-			oc->y + (int)roundf((sy - oc->srcy) * oc->scaley));
+	wlr_scene_node_set_position(&clone->node, vis.x, vis.y);
 	cloneblur(buffer, clone, oc->tree, dstw, dsth, corners);
 	oc->count++;
 }
@@ -4633,6 +4965,14 @@ overviewwindowbox(Monitor *m, Client *c, const struct wlr_box *panel)
 	struct wlr_box geo = (c->isfullscreen || c->isfakefull) ? c->prev : c->geom;
 	float scalex = (float)panel->width / m->w.width;
 	float scaley = (float)panel->height / m->w.height;
+
+	/* a window still sliding into place is drawn where it is right now,
+	 * so the card moves the way the window does */
+	if (c->anim.active && !c->anim.workspace && !c->anim.hide && !c->anim.zoom
+			&& c->scene && !c->isfullscreen && !c->isfakefull) {
+		geo.x = c->scene->node.x;
+		geo.y = c->scene->node.y;
+	}
 
 	if (DRIFTLT(m) && c->oncanvas && !c->isfloating
 			&& !c->isfullscreen && !c->isfakefull) {
@@ -4664,14 +5004,14 @@ overviewwindowbox(Monitor *m, Client *c, const struct wlr_box *panel)
 
 static void
 overviewwindowdraw(struct wlr_scene_tree *tree, Client *c,
-		const struct wlr_box *box, float opacity, int focused)
+		const struct wlr_box *box, float opacity, int focused,
+		const struct wlr_box *clip)
 {
 	float shadowcolor[] = {0.0f, 0.0f, 0.0f, 0.55f * opacity};
 	float windowcolor[] = {0.055f * opacity, 0.055f * opacity,
 		0.065f * opacity, 0.96f * opacity};
 	struct wlr_scene_tree *content;
 	struct wlr_scene_rect *back;
-	struct wlr_scene_shadow *shadow;
 	OverviewClone oc;
 	float scale;
 	int enabled, radius;
@@ -4681,24 +5021,20 @@ overviewwindowdraw(struct wlr_scene_tree *tree, Client *c,
 	scale = MIN((float)box->width / MAX(1, c->geom.width),
 			(float)box->height / MAX(1, c->geom.height));
 	radius = MAX(3, (int)roundf(MAX(4, corner_radius) * scale));
-	shadow = wlr_scene_shadow_create(tree, box->width, box->height,
-			radius, 12.0f, shadowcolor);
-	wlr_scene_node_set_position(&shadow->node, box->x, box->y + 3);
+	overviewshadow(tree, (struct wlr_box){box->x, box->y + 3, box->width,
+			box->height}, radius, 12.0f, shadowcolor, clip);
 	if (focused && !decorhidden && borderpx > 0) {
 		/* focus ring behind the clone, like the live focus border */
 		const float *fc = focuscolorfor();
 		float bcolor[] = {fc[0] * opacity, fc[1] * opacity,
 			fc[2] * opacity, fc[3] * opacity};
 		int fbw = MAX(2, (int)roundf(borderpx * scale) + 1);
-		struct wlr_scene_rect *ring = wlr_scene_rect_create(tree,
-				box->width + 2 * fbw, box->height + 2 * fbw, bcolor);
-		wlr_scene_rect_set_corner_radius(ring, radius + fbw);
-		wlr_scene_node_set_position(&ring->node, box->x - fbw, box->y - fbw);
+		overviewrect(tree, (struct wlr_box){box->x - fbw, box->y - fbw,
+				box->width + 2 * fbw, box->height + 2 * fbw},
+				radius + fbw, bcolor, clip);
 	}
 	content = wlr_scene_tree_create(tree);
-	back = wlr_scene_rect_create(content, box->width, box->height, windowcolor);
-	wlr_scene_rect_set_corner_radius(back, radius);
-	wlr_scene_node_set_position(&back->node, box->x, box->y);
+	back = overviewrect(content, *box, radius, windowcolor, clip);
 
 	if (!c->scene)
 		return;
@@ -4710,14 +5046,23 @@ overviewwindowdraw(struct wlr_scene_tree *tree, Client *c,
 		.srcx = c->scene->node.x, .srcy = c->scene->node.y,
 		.x = box->x, .y = box->y,
 		.radius = -1,
+		.clip = *clip,
 	};
 	enabled = c->scene->node.enabled;
 	if (!enabled)
 		wlr_scene_node_set_enabled(&c->scene->node, 1);
+	/* a window cut by the monitor edge is cloned whole; the crop above is
+	 * only for what is drawn on screen */
+	if (c->scene_surface && (c->offscreen || !c->scene_surface->node.enabled))
+		wlr_scene_node_set_enabled(&c->scene_surface->node, 1);
 	wlr_scene_node_for_each_buffer(&c->scene->node, overviewclone, &oc);
+	if (c->scene_surface && c->offscreen)
+		wlr_scene_node_set_enabled(&c->scene_surface->node, 0);
+	else if (c->scene_surface && !enabled)
+		clientclip(c);
 	if (!enabled)
 		wlr_scene_node_set_enabled(&c->scene->node, 0);
-	if (oc.count)
+	if (oc.count && back)
 		wlr_scene_node_destroy(&back->node);
 }
 
@@ -4727,7 +5072,7 @@ overviewwindow(struct wlr_scene_tree *tree, Monitor *m, Client *c,
 {
 	struct wlr_box box = overviewwindowbox(m, c, panel);
 
-	overviewwindowdraw(tree, c, &box, opacity, focused);
+	overviewwindowdraw(tree, c, &box, opacity, focused, &m->m);
 }
 
 static void
@@ -4738,8 +5083,6 @@ overviewpanel(Monitor *m, unsigned int ws, const struct wlr_box *box, float opac
 	float shadecolor[] = {0.0f, 0.0f, 0.0f, 0.10f * opacity};
 	float shadowcolor[] = {0.0f, 0.0f, 0.0f, 0.62f * opacity};
 	struct wlr_scene_tree *tree;
-	struct wlr_scene_rect *panel, *shade;
-	struct wlr_scene_shadow *shadow;
 	LayerSurface *l;
 	Client *c, *focus = NULL;
 	OverviewClone oc;
@@ -4761,22 +5104,18 @@ overviewpanel(Monitor *m, unsigned int ws, const struct wlr_box *box, float opac
 		.srcx = m->m.x, .srcy = m->m.y,
 		.x = box->x, .y = box->y,
 		.radius = MAX(6, (int)roundf(16.0f * box->width / m->m.width)),
+		.clip = m->m,
 	};
 
-	shadow = wlr_scene_shadow_create(tree, box->width, box->height,
-			oc.radius, 24.0f, shadowcolor);
-	wlr_scene_node_set_position(&shadow->node, box->x, box->y + 8);
-	panel = wlr_scene_rect_create(tree, box->width, box->height, panelcolor);
-	wlr_scene_rect_set_corner_radius(panel, oc.radius);
-	wlr_scene_node_set_position(&panel->node, box->x, box->y);
+	overviewshadow(tree, (struct wlr_box){box->x, box->y + 8, box->width,
+			box->height}, oc.radius, 24.0f, shadowcolor, &m->m);
+	overviewrect(tree, *box, oc.radius, panelcolor, &m->m);
 
 	wl_list_for_each(l, &m->layers[ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND], link) {
 		if (l->mapped)
 			wlr_scene_node_for_each_buffer(&l->scene->node, overviewclone, &oc);
 	}
-	shade = wlr_scene_rect_create(tree, box->width, box->height, shadecolor);
-	wlr_scene_rect_set_corner_radius(shade, oc.radius);
-	wlr_scene_node_set_position(&shade->node, box->x, box->y);
+	overviewrect(tree, *box, oc.radius, shadecolor, &m->m);
 
 	wl_list_for_each_reverse(c, &clients, link) {
 		if (c->mon == m && c->ws == ws
@@ -5191,8 +5530,11 @@ overviewmotion(void)
 			overview_dragging = 1;
 			overviewdragclear();
 			overview_drag_box.x = overview_drag_box.y = 0;
+			/* the ghost follows the cursor across monitors, so it is
+			 * the one thing that is not cut to one */
 			overviewwindowdraw(overview_drag_scene, overview_drag_client,
-					&overview_drag_box, 0.96f, 0);
+					&overview_drag_box, 0.96f, 0,
+					&(struct wlr_box){-(1 << 20), -(1 << 20), 1 << 21, 1 << 21});
 			overviewbuild();
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "grabbing");
 		}
@@ -5303,6 +5645,14 @@ overviewtoggle(const Arg *arg)
 	overviewset(!overview_active);
 }
 
+static int
+startoverview(void *data)
+{
+	if (selmon && overviewvalid(selmon) && !overview_visible)
+		overviewset(1);
+	return 0;
+}
+
 static void
 workspacestep(int dir)
 {
@@ -5403,11 +5753,25 @@ overviewfocuscol(int dir)
 	Column *cand = NULL, *it;
 	struct wl_list *pos;
 
-	if (!overview_active || !overviewvalid(m) || !SCROLLLT(m)
-			|| m->overview_animating)
+	if (!overview_active || !overviewvalid(m) || !SCROLLLT(m))
 		return;
 	if (!(sel = wsfocused(m, m->ws)))
 		return;
+	if (!sel->col) {
+		/* a floating window has no column; walk from the first one */
+		Column *first;
+		if (wl_list_empty(&m->cols[m->ws]))
+			return;
+		first = wl_container_of(m->cols[m->ws].next, first, link);
+		wl_list_for_each(cc, &first->clients, clink) {
+			if (!cc->isfloating) {
+				sel = cc;
+				break;
+			}
+		}
+		if (!sel->col)
+			return;
+	}
 	for (pos = dir > 0 ? sel->col->link.next : sel->col->link.prev;
 			pos != &m->cols[m->ws];
 			pos = dir > 0 ? pos->next : pos->prev) {
@@ -5436,6 +5800,42 @@ overviewfocuscol(int dir)
 	 * the pan animation shows inside the panel */
 	overviewtransition(m, target, shown, 1.0f);
 	overviewbuild();
+}
+
+/* Keys inside the overview.  Bare keys walk it (arrows, hjkl, 1-9, Escape,
+ * Return); anything with a modifier is the normal binding, so a terminal
+ * can be opened, a window closed or moved, a layout switched, all with the
+ * overview staying up and its cards following.  The bindings that would
+ * switch workspaces underneath it are turned into overview moves instead. */
+static int
+overviewkeybinding(uint32_t mods, xkb_keysym_t sym)
+{
+	const Bind *b;
+
+	if (!CLEANMASK(mods) || inputmode == ModeNormal)
+		return overviewkey(sym);
+	for (b = runkeys; b < runkeys + nrunkeys; b++) {
+		if (CLEANMASK(mods) != CLEANMASK(b->mod)
+				|| xkb_keysym_to_lower(sym) != xkb_keysym_to_lower(b->keysym)
+				|| !b->func)
+			continue;
+		if (b->func == viewws) {
+			overviewnavigate(b->arg.ui, b->arg.ui > selmon->ws ? 1 : -1);
+		} else if (b->func == wsstep) {
+			overviewnavigate((selmon->ws + NUMWS + b->arg.i) % NUMWS,
+					b->arg.i);
+		} else if (b->func == focusdir) {
+			overviewkey(b->arg.i == DirLeft ? XKB_KEY_Left
+					: b->arg.i == DirRight ? XKB_KEY_Right
+					: b->arg.i == DirUp ? XKB_KEY_Up : XKB_KEY_Down);
+		} else if (b->func == overviewtoggle) {
+			overviewset(0);
+		} else {
+			b->func(&b->arg);
+		}
+		return 1;
+	}
+	return 1;
 }
 
 int
@@ -5545,7 +5945,8 @@ keypress(struct wl_listener *listener, void *data)
 		if (overview_visible)
 			group->overview_keycode = event->keycode;
 		for (i = 0; i < nsyms; i++)
-			handled = (overview_visible ? (overview_active ? overviewkey(syms[i]) : 1)
+			handled = (overview_visible ? (overview_active
+						? overviewkeybinding(mods, syms[i]) : 1)
 					: keybinding(mods, syms[i])) || handled;
 	}
 	if (event->state == WL_KEYBOARD_KEY_STATE_RELEASED && !overviewkeypassthrough()
@@ -6224,6 +6625,10 @@ rendermon(struct wl_listener *listener, void *data)
 	 * them before anything is built from them this frame. */
 	driftapply(m);
 
+	if (overview_visible && overview_dirty && !skipframe) {
+		overview_dirty = 0;
+		overviewbuild();
+	}
 	if (animations || overview_visible) {
 		uint32_t t_now = now_ms();
 		float dt = m->lastanimtick && t_now > m->lastanimtick
@@ -6240,6 +6645,10 @@ rendermon(struct wl_listener *listener, void *data)
 				animpending = 1;
 				if (skipframe)
 					continue;
+				/* the cards follow a window that is on the move (the
+				 * strip panning to a column, a retile), so the
+				 * overview is redrawn every frame it runs */
+				overview_dirty |= overview_visible;
 				duration = c->anim.workspace
 						? MAX(180, animation_duration * 5 / 4)
 						: c->anim.fadein
@@ -6254,8 +6663,7 @@ rendermon(struct wl_listener *listener, void *data)
 						c->anim.zoom = 0;
 						clientunscale(c);
 					}
-					wlr_scene_node_set_position(&c->scene->node,
-							c->anim.hide ? c->geom.x : targetx,
+					clientplace(c, c->anim.hide ? c->geom.x : targetx,
 							c->anim.hide ? c->geom.y : targety);
 					if (c->anim.hide) {
 						/* the workspace can have come back while this
@@ -6286,14 +6694,16 @@ rendermon(struct wl_listener *listener, void *data)
 					/* grow the whole frame out of its own centre */
 					float z = zoom_initial_ratio
 							+ (1.0f - zoom_initial_ratio) * e;
-					clientscale(c, z);
+					/* position first: the scale pass crops against the
+					 * monitor from where the frame is */
 					wlr_scene_node_set_position(&c->scene->node,
 							targetx + (int)roundf(c->geom.width
 									* (1.0f - z) / 2.0f),
 							targety + (int)roundf(c->geom.height
 									* (1.0f - z) / 2.0f));
+					clientscale(c, z);
 				} else {
-					wlr_scene_node_set_position(&c->scene->node,
+					clientplace(c,
 							c->anim.from.x + (int)((float)(targetx - c->anim.from.x) * e),
 							c->anim.from.y + (int)((float)(targety - c->anim.from.y) * e));
 				}
@@ -6314,7 +6724,11 @@ rendermon(struct wl_listener *listener, void *data)
 			motionnotify(0, NULL, 0, 0, 0, 0);
 		if (overviewadvance(m, dt)) {
 			overviewbuild();
+			overview_dirty = 0;
 			animpending |= m->overview_animating;
+		} else if (overview_visible && overview_dirty) {
+			overviewbuild();
+			overview_dirty = 0;
 		}
 	}
 	overviewfinish();
@@ -6328,6 +6742,7 @@ skip:
 	/* Let clients know a frame has been rendered */
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(m->scene_output, &now);
+	overviewframes(m, &now);
 	wlr_output_state_finish(&pending);
 	/* scheduling a frame without a commit fires immediately and would spin
 	 * the event loop; while a resize is pending the client's next commit
@@ -6412,12 +6827,6 @@ resize(Client *c, struct wlr_box geo, int interact)
 	if (!c->anim.active)
 		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 	wlr_scene_node_set_position(&c->scene_surface->node, c->bw, c->bw);
-	{
-		/* the open animation redraws these at its own size every frame */
-		int r = (c->isfullscreen || c->isfakefull) ? 0
-				: MIN(MAX(0, corner_radius), MIN(c->geom.width, c->geom.height) / 2);
-		clientborders(c, c->geom.width, c->geom.height, (int)c->bw, r);
-	}
 
 	/* a window that left the canvas keeps its scaled buffers until it next
 	 * commits, which is long enough to click on the wrong place */
@@ -6446,6 +6855,8 @@ resize(Client *c, struct wlr_box geo, int interact)
 	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
 	if (drifted && (driftz(c->mon, c->ws) != 1.0 || c->mon->driftscaled))
 		driftscaleclient(c, driftz(c->mon, c->ws));
+	/* the frame and the crop to the monitor, for whatever is not scaled */
+	clientclip(c);
 }
 
 void
@@ -6456,6 +6867,7 @@ run(char *startup_cmd)
 	if (!socket)
 		die("startup: display_add_socket_auto");
 	setenv("WAYLAND_DISPLAY", socket, 1);
+	wlr_log(WLR_INFO, "Running compositor on wayland display '%s'", socket);
 
 	/* Start the backend. This will enumerate outputs and inputs, become the DRM
 	 * master, etc */
@@ -6496,8 +6908,16 @@ run(char *startup_cmd)
 	{
 		Arg a = {.v = (const char *[]){ "/bin/sh", "-c",
 			"command -v dbus-update-activation-environment >/dev/null 2>&1 "
-			"&& exec dbus-update-activation-environment --all", NULL }};
+			"&& exec dbus-update-activation-environment --systemd --all", NULL }};
 		spawn(&a);
+	}
+
+	/* the session can open on the overview, so the first thing seen is
+	 * every workspace and the dash rather than an empty desktop */
+	if (start_in_overview) {
+		struct wl_event_source *t = wl_event_loop_add_timer(
+				wl_display_get_event_loop(dpy), startoverview, NULL);
+		wl_event_source_timer_update(t, 300);
 	}
 
 	/* Run the autostart commands from the config file */
@@ -6805,6 +7225,10 @@ cfgaction(const char *act, void (**func)(const Arg *), Arg *arg)
 		{ "wm:move_to_workspace_right", movewsdir,          {.i = DirRight} },
 		{ "wm:move_to_workspace_up",  movewsdir,            {.i = DirUp} },
 		{ "wm:move_to_workspace_down", movewsdir,           {.i = DirDown} },
+		{ "wm:move_left",             movedir,              {.i = DirLeft} },
+		{ "wm:move_right",            movedir,              {.i = DirRight} },
+		{ "wm:move_up",               movedir,              {.i = DirUp} },
+		{ "wm:move_down",             movedir,              {.i = DirDown} },
 	};
 	size_t i;
 	int n;
@@ -7187,6 +7611,8 @@ readconfig(void)
 				cfgaddbind(&runnormalkeys, &nrunnormalkeys, mods, sym, func, arg);
 		} else if (!strcmp(k, "remember_layout")) {
 			remember_layout = !strcmp(v, "true") || !strcmp(v, "1");
+		} else if (!strcmp(k, "start_in_overview")) {
+			start_in_overview = !strcmp(v, "true") || !strcmp(v, "1");
 		} else if (!strcmp(k, "layout")) {
 			default_layout = !strcmp(v, "scroll") ? LtScroll
 					: !strcmp(v, "drift") ? LtDrift : LtBSP;
@@ -7857,7 +8283,7 @@ viewws(const Arg *arg)
 			c->anim.hide = 0;
 			c->anim.active = 1;
 			c->anim.t = 0.0f;
-			wlr_scene_node_set_position(&c->scene->node, c->anim.from.x, c->anim.from.y);
+			clientplace(c, c->anim.from.x, c->anim.from.y);
 			started = 1;
 		}
 		if (started)
@@ -7908,6 +8334,50 @@ movewsstep(const Arg *arg)
 		return;
 	a.ui = (selmon->ws + NUMWS + arg->i) % NUMWS;
 	movetowsfollow(&a);
+}
+
+void
+movedir(const Arg *arg)
+{
+	/* Mod+Ctrl+arrow: the window trades places with its neighbour in that
+	 * direction, and once there is no neighbour left it goes on to the
+	 * workspace that lies that way (up and down in the scroll layout,
+	 * left and right in the others, as the workspaces are laid out). */
+	Client *sel = focustop(selmon);
+	int dir = arg->i, sideways;
+
+	if (!sel || !selmon)
+		return;
+	if (sel->isfloating || sel->isfullscreen || sel->isfakefull
+			|| sel->oncanvas) {
+		movewsdir(arg);
+		return;
+	}
+	sideways = dir == DirLeft || dir == DirRight;
+	if (sel->col) {
+		if (sideways) {
+			struct wl_list *pos = dir == DirLeft ? sel->col->link.prev
+					: sel->col->link.next;
+			if (pos != &selmon->cols[sel->ws]) {
+				scroll_swap(sel, dir);
+				return;
+			}
+		} else {
+			struct wl_list *pos = dir == DirUp ? sel->clink.prev
+					: sel->clink.next;
+			if (pos != &sel->col->clients) {
+				scroll_swap(sel, dir);
+				return;
+			}
+		}
+		movewsdir(arg);
+		return;
+	}
+	if (sel->node && dirpick(selmon, sel, dir)) {
+		swapdir(arg);
+		return;
+	}
+	movewsdir(arg);
 }
 
 void

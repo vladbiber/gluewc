@@ -37,6 +37,7 @@ static float animation_curve_close[4]      = {0.42f, 0.0f, 0.6f, 1.0f};  /* ease
 static float scroll_colfrac                = 0.5f; /* default column width in the niri-style scroll layout */
 static int default_layout                  = LtBSP; /* layout new monitors start in: LtBSP, LtScroll or LtDrift */
 static int remember_layout                 = 1;     /* reopen in the layout the last session ended in */
+static int start_in_overview               = 1;     /* open the session on the overview */
 /* drift layout — driftwm-style infinite canvas */
 static int drift_snap                      = 24;    /* edge snapping distance, in canvas pixels */
 static int drift_nudge                     = 20;    /* pixels a window moves per keyboard nudge */
@@ -196,10 +197,10 @@ static const Key keys[] = {
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Up,         swapdir,        {.i = DirUp} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Down,       swapdir,        {.i = DirDown} },
 	/* pans the camera in the drift layout, swaps windows everywhere else */
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Left,       movewsdir,      {.i = DirLeft} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Right,      movewsdir,      {.i = DirRight} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Up,         movewsdir,      {.i = DirUp} },
-	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Down,       movewsdir,      {.i = DirDown} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Left,       movedir,        {.i = DirLeft} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Right,      movedir,        {.i = DirRight} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Up,         movedir,        {.i = DirUp} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_Down,       movedir,        {.i = DirDown} },
 	{ MODKEY|WLR_MODIFIER_ALT,   XKB_KEY_Left,       driftpankey,    {.i = DirLeft} },
 	{ MODKEY|WLR_MODIFIER_ALT,   XKB_KEY_Right,      driftpankey,    {.i = DirRight} },
 	{ MODKEY|WLR_MODIFIER_ALT,   XKB_KEY_Up,         driftpankey,    {.i = DirUp} },

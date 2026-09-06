@@ -1,4 +1,5 @@
-/* wshot — wlr-screencopy screenshot of the first output, written as PPM. */
+/* wshot [file] [output-index] — wlr-screencopy screenshot of one output (the
+ * first by default), written as PPM. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,7 @@
 
 static struct wl_shm *shm;
 static struct wl_output *output;
+static int want_output, seen_outputs;
 static struct zwlr_screencopy_manager_v1 *mgr;
 static struct wl_buffer *buf;
 static void *bufdata;
@@ -20,8 +22,10 @@ static void reg_global(void *d, struct wl_registry *reg, uint32_t name,
 {
 	if (!strcmp(iface, wl_shm_interface.name))
 		shm = wl_registry_bind(reg, name, &wl_shm_interface, 1);
-	else if (!strcmp(iface, wl_output_interface.name) && !output)
-		output = wl_registry_bind(reg, name, &wl_output_interface, 1);
+	else if (!strcmp(iface, wl_output_interface.name)) {
+		if (seen_outputs++ == want_output)
+			output = wl_registry_bind(reg, name, &wl_output_interface, 1);
+	}
 	else if (!strcmp(iface, zwlr_screencopy_manager_v1_interface.name))
 		mgr = wl_registry_bind(reg, name, &zwlr_screencopy_manager_v1_interface, 1);
 }
@@ -58,6 +62,7 @@ int main(int argc, char *argv[])
 	uint32_t x, y;
 
 	if (!dpy) return 1;
+	if (argc > 2) want_output = atoi(argv[2]);
 	reg = wl_display_get_registry(dpy);
 	wl_registry_add_listener(reg, &reg_lis, NULL);
 	wl_display_roundtrip(dpy);

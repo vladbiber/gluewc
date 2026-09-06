@@ -4,6 +4,53 @@
 
 ### Added
 
+- Nothing crosses a monitor edge any more. Every window is cut at the edge of
+  its own monitor — a scroll-layout column hanging off the right, a window
+  sliding a full screen away during a workspace switch, a retile crossing the
+  edge for a few frames, a drift canvas that runs past it — and so is every
+  overview card, panel and shadow. With two monitors the neighbour used to
+  show the other monitor's off-screen columns and, in the overview, its side
+  panels sliding in from the wrong side
+- The overview is live: the windows keep getting frame callbacks while it is
+  up and every commit redraws the card it belongs to, so a video plays inside
+  its card and a terminal keeps scrolling. A wallpaper that changes while the
+  overview is open changes in the cards too
+- Every keybinding with a modifier works inside the overview — open a
+  terminal, close a window, cycle layouts — and the cards follow; the bindings
+  that would switch workspace underneath it move the overview instead. The
+  scroll layout's overview arrows no longer drop presses during a transition
+  and the card pans smoothly with the strip
+- `start_in_overview` (default true) opens the session straight onto the
+  overview
+- `wm:move_left/right/up/down`, on `Super+Ctrl+Arrow` by default: the window
+  trades places with its neighbour in that direction, and when there is none
+  left it goes on to the workspace that lies that way (up/down in the scroll
+  layout, left/right elsewhere). `wm:move_to_workspace_*` stay for the second
+  half on its own
+- `gluewc-msg`, a dwl-ipc client (`status`, `workspace N`, `move N`, `layout
+  NAME`, `quit`, `-o OUTPUT`), and `$XDG_STATE_HOME/gluewc/workspaces`, one
+  line per output with the active workspace and the window counts, written on
+  every change. Together they give a bar without a dwl-ipc module — upstream
+  quickshell, a script — the workspaces; glueqs uses them now, so it no longer
+  needs the `Quickshell.DWL` module that only the noctalia-qs fork carries
+- `gluewc-session` uses the user D-Bus bus that systemd or dbus-broker already
+  runs instead of starting a second one with `dbus-run-session` (which split
+  the desktop in two on Arch: portals and PipeWire on one bus, the apps on the
+  other), starts audio through the systemd user units where there are any
+  instead of next to them, and elsewhere starts PipeWire, WirePlumber and
+  pipewire-pulse in order and restarts one that dies, with their output in
+  `~/.local/state/gluewc-audio.log`. `dbus-update-activation-environment` is
+  called with `--systemd` so bus-activated services under systemd see the
+  display too
+- `install.sh` installs `xdg-desktop-portal` and `xdg-desktop-portal-wlr`
+  with the session (screen sharing and file dialogs for Discord, Flatpaks and
+  Electron apps), writes a WirePlumber drop-in that keeps Bluetooth headphones
+  on their music profile when an app opens the microphone (the classic
+  "Discord broke my sound"), installs `curl` and `bluez` with the bar, warns
+  about a Quickshell older than 0.2 and about a wallpaper daemon left in the
+  autostart now that glueqs paints the wallpaper itself
+- The compositor logs the Wayland socket it runs on
+
 - `install.sh --update` pulls the checkout it runs from, hands over to the
   script that came with the new source, rebuilds and installs. Re-running the
   installer already worked from `curl | sh`, which clones fresh every time, but
@@ -22,12 +69,11 @@
   Ubuntu, so that step is allowed to fail — the bar is configured either way
   and the script says where to get the binary
 
-- `Super+Ctrl+Arrow` takes the focused window along to the workspace in that
-  direction, on the same axis `Super+Arrow` steps along when there is nothing
-  left to focus: left and right in the BSP and drift layouts, up and down in
-  the scroll layout, which stacks workspaces vertically the way niri does. A
-  press across that axis does nothing. New actions
-  `wm:move_to_workspace_left/right/up/down`
+- `wm:move_to_workspace_left/right/up/down` take the focused window along to
+  the workspace in that direction, on the same axis `Super+Arrow` steps along
+  when there is nothing left to focus: left and right in the BSP and drift
+  layouts, up and down in the scroll layout, which stacks workspaces
+  vertically the way niri does. A press across that axis does nothing
 - `Super+Ctrl+wheel` takes the window along to the workspace the wheel lands
   on, the mouse counterpart of `Super+Ctrl+Arrow`. Plain `Super+wheel` still
   only changes the view

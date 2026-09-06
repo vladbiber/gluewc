@@ -15,14 +15,21 @@ GLUEWCDEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
 PKGS      = wayland-server xkbcommon libinput $(XLIBS)
 GLUEWCCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(SCENEFX_INCS) $(WLR_INCS) $(GLUEWCCPPFLAGS) $(GLUEWCDEVCFLAGS) $(CFLAGS)
 LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(SCENEFX_LIBS) $(WLR_LIBS) -lm $(LIBS)
+# gluewc-msg is a plain Wayland client
+MSGCFLAGS = `$(PKG_CONFIG) --cflags wayland-client` -I. $(GLUEWCDEVCFLAGS) $(CFLAGS)
+MSGLIBS   = `$(PKG_CONFIG) --libs wayland-client` $(LIBS)
 
-all: gluewc
+all: gluewc gluewc-msg
 
 check: gluewc
 	sh -n install.sh gluewc-session tests/drm-test.sh
 	$(MAKE) -C tests
 gluewc: gluewc.o util.o dwl-ipc-unstable-v2-protocol.o
 	$(CC) gluewc.o util.o dwl-ipc-unstable-v2-protocol.o $(GLUEWCCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+gluewc-msg: gluewc-msg.o dwl-ipc-unstable-v2-protocol.o
+	$(CC) gluewc-msg.o dwl-ipc-unstable-v2-protocol.o $(MSGCFLAGS) $(LDFLAGS) $(MSGLIBS) -o $@
+gluewc-msg.o: gluewc-msg.c dwl-ipc-unstable-v2-client-protocol.h
+	$(CC) $(CPPFLAGS) $(MSGCFLAGS) -o $@ -c gluewc-msg.c
 gluewc.o: gluewc.c client.h config.h config.mk cursor-shape-v1-protocol.h \
 	dwl-ipc-unstable-v2-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
@@ -57,26 +64,31 @@ dwl-ipc-unstable-v2-protocol.h:
 dwl-ipc-unstable-v2-protocol.c:
 	$(WAYLAND_SCANNER) private-code \
 		protocols/dwl-ipc-unstable-v2.xml $@
+dwl-ipc-unstable-v2-client-protocol.h:
+	$(WAYLAND_SCANNER) client-header \
+		protocols/dwl-ipc-unstable-v2.xml $@
 
 config.h:
 	cp config.def.h $@
 clean:
-	rm -f gluewc *.o *-protocol.h *-protocol.c
+	rm -f gluewc gluewc-msg *.o *-protocol.h *-protocol.c
 
 dist: clean
 	mkdir -p gluewc-$(VERSION)
 	cp -R .github docs LICENSE* Makefile CHANGELOG.md CONTRIBUTING.md \
 		README.md SECURITY.md install.sh flake.nix client.h config.def.h \
-		config.def.conf config.mk protocols gluewc.1 gluewc.c util.c util.h \
-		gluewc.desktop gluewc-session gluewc-$(VERSION)
+		config.def.conf config.mk protocols gluewc.1 gluewc.c gluewc-msg.c \
+		util.c util.h gluewc.desktop gluewc-session gluewc-$(VERSION)
 	tar -caf gluewc-$(VERSION).tar.gz gluewc-$(VERSION)
 	rm -rf gluewc-$(VERSION)
 
-install: gluewc
+install: gluewc gluewc-msg
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
-	rm -f $(DESTDIR)$(PREFIX)/bin/gluewc
+	rm -f $(DESTDIR)$(PREFIX)/bin/gluewc $(DESTDIR)$(PREFIX)/bin/gluewc-msg
 	cp -f gluewc $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/gluewc
+	cp -f gluewc-msg $(DESTDIR)$(PREFIX)/bin
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/gluewc-msg
 	cp -f gluewc-session $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/gluewc-session
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
@@ -94,7 +106,7 @@ install: gluewc
 	sync
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/gluewc $(DESTDIR)$(PREFIX)/bin/gluewc-session \
-		$(DESTDIR)$(MANDIR)/man1/gluewc.1 \
+		$(DESTDIR)$(PREFIX)/bin/gluewc-msg $(DESTDIR)$(MANDIR)/man1/gluewc.1 \
 		$(DESTDIR)$(DATADIR)/gluewc/config.def.conf \
 		$(DESTDIR)$(SESSIONDIR)/gluewc.desktop
 	rm -rf $(DESTDIR)$(DATADIR)/doc/gluewc

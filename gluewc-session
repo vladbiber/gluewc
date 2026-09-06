@@ -1,4 +1,7 @@
 #!/bin/sh
+# gluewc-session: what the display manager runs (or what you run from a TTY).
+# It seeds the config, finds the right D-Bus session, gets audio going and
+# then runs the compositor with its stderr kept in ~/.local/state/gluewc.log.
 
 export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_DESKTOP=gluewc
@@ -21,32 +24,114 @@ if [ ! -e "$CFGDIR/config.conf" ]; then
 	done
 fi
 
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] \
-		&& command -v dbus-run-session >/dev/null 2>&1; then
-	exec dbus-run-session -- "$0" "$@"
-fi
+RUNDIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
-start_once() {
-	command -v "$1" >/dev/null 2>&1 || return
-	if ! pgrep -u "$(id -u)" -x "$1" >/dev/null 2>&1; then
-		"$@" >/dev/null 2>&1 &
+# D-Bus.  On a systemd (or dbus-broker) system the user bus is already up at
+# $XDG_RUNTIME_DIR/bus and everything else — pipewire, the portals, the
+# notification daemon — lives on it.  Starting a second bus with
+# dbus-run-session here would split the desktop in two: the apps started by
+# the compositor on one bus, the services on the other, and nothing finds
+# anything.  So the existing bus is used when there is one, and
+# dbus-run-session is only the fallback for systems without a user bus.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+	if [ -S "$RUNDIR/bus" ]; then
+		DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNDIR/bus"
+		export DBUS_SESSION_BUS_ADDRESS
+	elif command -v dbus-run-session >/dev/null 2>&1; then
+		exec dbus-run-session -- "$0" "$@"
 	fi
-}
-
-start_once pipewire
-start_once wireplumber
-start_once pipewire-pulse
+fi
 
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}"
 LOG="$LOGDIR/gluewc.log"
+AUDIOLOG="$LOGDIR/gluewc-audio.log"
 mkdir -p "$LOGDIR"
 mv -f "$LOG" "$LOG.old" 2>/dev/null
 ulimit -c unlimited 2>/dev/null
 
+# Audio.  Where systemd manages the user session (Arch, Fedora, Debian...)
+# the PipeWire units are the right thing to use: starting the daemons by
+# hand next to the sockets systemd already listens on gives two of each and a
+# broken graph.  Everywhere else the daemons are started here, in order, and
+# kept alive for as long as the session lasts: a PipeWire that dies takes the
+# sound with it until logout otherwise.
+has_user_systemd() {
+	command -v systemctl >/dev/null 2>&1 \
+		&& [ -d /run/systemd/system ] \
+		&& systemctl --user show-environment >/dev/null 2>&1
+}
+
+AUDIO_SUPERVISOR=
+if has_user_systemd; then
+	systemctl --user import-environment XDG_SESSION_TYPE XDG_SESSION_DESKTOP \
+		XDG_CURRENT_DESKTOP >/dev/null 2>&1
+	for unit in pipewire.socket pipewire-pulse.socket wireplumber.service; do
+		systemctl --user start "$unit" >/dev/null 2>&1
+	done
+else
+	# The daemons that are not running yet are ours to start and restart; one
+	# that was already there (another session, a system-wide setup) is left
+	# alone.  Restarts are rate limited so a daemon that cannot start at all
+	# does not spin.
+	supervise_audio() {
+		uid=$(id -u)
+		: > "$AUDIOLOG"
+		pw_pid= wp_pid= pp_pid=
+		pw_own=0 wp_own=0 pp_own=0
+		restarts=0
+		window=$(date +%s)
+		start_daemon() {
+			# $1 = command, $2 = variable prefix
+			"$1" >>"$AUDIOLOG" 2>&1 &
+			eval "${2}_pid=$!"
+			eval "${2}_own=1"
+		}
+		want() {
+			command -v "$1" >/dev/null 2>&1 || return 1
+			! pgrep -u "$uid" -x "$1" >/dev/null 2>&1
+		}
+		want pipewire && start_daemon pipewire pw
+		sleep 0.3
+		want wireplumber && start_daemon wireplumber wp
+		want pipewire-pulse && start_daemon pipewire-pulse pp
+		while kill -0 "$GLUEWC_PID" 2>/dev/null; do
+			sleep 2
+			now=$(date +%s)
+			if [ $((now - window)) -ge 60 ]; then
+				window=$now
+				restarts=0
+			fi
+			[ "$restarts" -lt 5 ] || continue
+			for d in pw wp pp; do
+				eval "own=\$${d}_own; pid=\$${d}_pid"
+				[ "$own" -eq 1 ] || continue
+				kill -0 "$pid" 2>/dev/null && continue
+				case $d in
+				pw) cmd=pipewire ;;
+				wp) cmd=wireplumber ;;
+				pp) cmd=pipewire-pulse ;;
+				esac
+				printf '%s: %s exited, starting it again\n' "$(date)" "$cmd" >>"$AUDIOLOG"
+				restarts=$((restarts + 1))
+				start_daemon "$cmd" "$d"
+				sleep 0.3
+			done
+		done
+	}
+fi
+
 {
 	printf '== gluewc session %s ==\n' "$(date)"
-	gluewc "$@"
+	printf 'D-Bus: %s\n' "${DBUS_SESSION_BUS_ADDRESS:-none}"
+	gluewc "$@" &
+	GLUEWC_PID=$!
+	if [ -z "$AUDIO_SUPERVISOR" ] && ! has_user_systemd; then
+		supervise_audio &
+		AUDIO_SUPERVISOR=$!
+	fi
+	wait "$GLUEWC_PID"
 	status=$?
+	[ -n "$AUDIO_SUPERVISOR" ] && kill "$AUDIO_SUPERVISOR" 2>/dev/null
 	printf '== gluewc exited status=%s %s ==\n' "$status" "$(date)"
 	sync 2>/dev/null
 	exit "$status"

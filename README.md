@@ -35,7 +35,13 @@ GitHub hands mp4 files over as downloads instead of playing them in the page.
 - Nine independent workspaces on every monitor
 - Animated window open, close, retile and workspace transitions, with
   configurable type, duration and cubic-bezier easing
-- GNOME-style overview with neighboring workspaces and live wallpaper layers
+- GNOME-style overview with neighboring workspaces, live windows (a video
+  keeps playing, a terminal keeps scrolling) and the wallpaper underneath; the
+  session can open straight onto it, and every keybinding keeps working while
+  it is up
+- Every window and overview card is cut at the edge of its own monitor, so a
+  strip that hangs off screen or a workspace sliding in never shows up on the
+  monitor next door
 - Niri-style scrolling layout per monitor (Mod-N): columns on an endless strip,
   vertical workspace slides and a vertical overview over the wallpaper
 - driftwm-style drift layout (Mod-N again): windows keep their native size on
@@ -175,7 +181,7 @@ and a notification naming the line. `Super+Shift+R` still reloads by hand.
 | `Super+Arrow` or `Super+H/J/K/L` | Directional focus |
 | `Super+Shift+Arrow` | Swap windows (nudge them in the drift layout) |
 | `Super+N` | Cycle BSP, scroll and drift layouts |
-| `Super+Ctrl+Arrow` | Take the window along to the workspace that way |
+| `Super+Ctrl+Arrow` | Move the window that way: swap with the neighbour, or on to the next workspace when there is none |
 | `Super+Alt+Arrow` | Pan the drift canvas |
 | `Print` / `Shift+Print` | Screenshot the screen / a selected area |
 | `Ctrl+Print` / `Super+Shift+S` | The same, onto the clipboard |
@@ -214,7 +220,11 @@ uses `brightnessctl` and falls back to `light`. Every one of these is a plain
 
 In the overview, use arrows, workspace numbers, the mouse wheel or a two-finger
 horizontal swipe to navigate. Click a window to focus it, or drag it onto the
-left, center or right workspace. A three-finger horizontal swipe changes the
+left, center or right workspace. Every `Super` binding still works while it is
+up — open a terminal, close a window, switch layouts — and the cards follow;
+`Super+1…9` and the workspace bindings move the overview instead of switching
+underneath it. `start_in_overview = true` (the default) opens the session on
+it. A three-finger horizontal swipe changes the
 workspace from the desktop; a three-finger vertical swipe opens or closes the
 overview. `Super+wheel` also changes workspace. In the drift layout three
 fingers pan the canvas and a pinch zooms it, so four fingers take over
@@ -229,21 +239,32 @@ in the overview.
 Examples for `~/.config/gluewc/config.conf`:
 
 ```ini
-autostart = swww-daemon
-autostart = waypaper --restore
+autostart = swaybg -i ~/Pictures/wallpaper.jpg -m fill
 autostart = waybar
 ```
 
-Use either wallpaper command, not both. With neither, `root_color = 000000`
-keeps the background black. Waybar can use its `dwl` workspaces module; desktop
-shells can also consume the foreign-toplevel protocol.
+With no wallpaper program, `root_color = 000000` keeps the background black.
+Waybar can use its `dwl` workspaces module; desktop shells can also consume the
+foreign-toplevel protocol. For shells without a dwl-ipc module gluewc keeps
+`$XDG_STATE_HOME/gluewc/workspaces` up to date (one line per output: name,
+active, workspace, window counts, layout) and installs `gluewc-msg`, which
+speaks the same protocol from the command line:
+
+```sh
+gluewc-msg status                        # one line per output
+gluewc-msg -o eDP-1 workspace 3          # view workspace 3 there
+gluewc-msg move 2                        # send the focused window to 2
+gluewc-msg layout scroll
+```
 
 ### glueqs
 
 [glueqs](https://github.com/vladbiber/glueqs) is a Quickshell desktop shell
-written alongside gluewc: a dot-matrix bar with workspaces off the dwl IPC,
-tray, media, network, weather and notifications, plus OSDs, a launcher and a
-dash that appears over the overview. It is the shell in the video above.
+written alongside gluewc: a dot-matrix bar with workspaces, tray, media,
+network, weather and notifications, plus OSDs, a launcher, the wallpaper (it
+paints it itself, with a picker on `Super+W`) and a dash that appears over the
+overview. It is the shell in the video above. It runs on upstream Quickshell,
+so it works with whatever `quickshell` your distribution packages.
 
 It is entirely optional — gluewc runs with waybar, any other layer-shell bar,
 or none at all — but it is the combination the compositor is developed against:
