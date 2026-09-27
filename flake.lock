@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "glueqs": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1788708441,
+        "narHash": "sha256-U46u92oUPIGIMlg9ELznePy48j8z69XMBb07G74c6wQ=",
+        "owner": "vladbiber",
+        "repo": "glueqs",
+        "rev": "1c787c3fa8ade2d7fe1148c5f76facdb8313053e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "vladbiber",
+        "repo": "glueqs",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1787736819,
@@ -18,6 +34,7 @@
     },
     "root": {
       "inputs": {
+        "glueqs": "glueqs",
         "nixpkgs": "nixpkgs"
       }
     }

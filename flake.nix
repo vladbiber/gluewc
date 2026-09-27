@@ -2,9 +2,19 @@
   description = "gluewc — an animated Wayland compositor with BSP, scrolling and infinite-canvas layouts";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # The bar's QML tree, packaged here so a broken glueqs flake can never
+  # break a gluewc rebuild; `nix flake update glueqs` moves it forward.
+  inputs.glueqs = {
+    url = "github:vladbiber/glueqs";
+    flake = false;
+  };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      glueqs,
+    }:
     let
       lib = nixpkgs.lib;
       systems = [
@@ -22,8 +32,13 @@
       ];
 
       # BEGIN package
+      # withBar adds the bar to the default config the session seeds at first
+      # login, which is how the module's bar.enable reaches a fresh account.
       mkGluewc =
         pkgs:
+        {
+          withBar ? false,
+        }:
         pkgs.stdenv.mkDerivation {
           pname = "gluewc";
           inherit version;
@@ -87,6 +102,9 @@
                   ]
                 )
               }:$out/bin
+          ''
+          + lib.optionalString withBar ''
+            printf '\n# the glueqs bar\nautostart = glueqs\n' >> $out/share/gluewc/config.def.conf
           '';
 
           passthru.providedSessions = [ "gluewc" ];
@@ -100,18 +118,65 @@
           };
         };
       # END package
+
+      # glueqs: the QML tree under share/glueqs and a `glueqs` command that
+      # runs it with the Quickshell from nixpkgs. Its settings live under
+      # $XDG_CONFIG_HOME/glueqs, so the store path being read-only is fine.
+      # The bar shells out to curl, bluetoothctl and loginctl; nmcli is only
+      # used when NetworkManager is there, so it is not forced onto PATH.
+      mkGlueqs =
+        pkgs:
+        pkgs.stdenvNoCC.mkDerivation {
+          pname = "glueqs";
+          version = "0-unstable-${glueqs.lastModifiedDate or "unknown"}";
+          src = glueqs;
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          dontBuild = true;
+          dontConfigure = true;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/share/glueqs $out/bin
+            cp -r . $out/share/glueqs
+            rm -rf $out/share/glueqs/docs $out/share/glueqs/flake.nix $out/share/glueqs/flake.lock
+            makeWrapper ${pkgs.quickshell}/bin/qs $out/bin/glueqs \
+              --add-flags "-p $out/share/glueqs" \
+              --prefix PATH : ${
+                lib.makeBinPath (
+                  with pkgs;
+                  [
+                    curl
+                    bluez
+                    coreutils
+                  ]
+                )
+              }
+            runHook postInstall
+          '';
+          meta = {
+            description = "Dot-matrix desktop shell for gluewc, on Quickshell";
+            homepage = "https://github.com/vladbiber/glueqs";
+            license = lib.licenses.gpl3Only;
+            mainProgram = "glueqs";
+            platforms = lib.platforms.linux;
+          };
+        };
     in
     {
       packages = forAllSystems (pkgs: rec {
-        gluewc = mkGluewc pkgs;
+        gluewc = mkGluewc pkgs { };
+        gluewc-with-bar = mkGluewc pkgs { withBar = true; };
+        glueqs = mkGlueqs pkgs;
         default = gluewc;
       });
 
-      overlays.default = final: _prev: { gluewc = mkGluewc final; };
+      overlays.default = final: _prev: {
+        gluewc = mkGluewc final { };
+        glueqs = mkGlueqs final;
+      };
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          inputsFrom = [ (mkGluewc pkgs) ];
+          inputsFrom = [ (mkGluewc pkgs { }) ];
           packages = with pkgs; [
             gdb
             foot
@@ -154,9 +219,33 @@
 
             package = lib.mkOption {
               type = lib.types.package;
-              default = self.packages.${pkgs.stdenv.hostPlatform.system}.gluewc;
+              default =
+                if cfg.bar.enable then
+                  self.packages.${pkgs.stdenv.hostPlatform.system}.gluewc-with-bar
+                else
+                  self.packages.${pkgs.stdenv.hostPlatform.system}.gluewc;
               defaultText = lib.literalExpression "gluewc.packages.\${system}.gluewc";
-              description = "The gluewc package to install.";
+              description = ''
+                The gluewc package to install. With bar.enable the default
+                is the same package whose seeded config autostarts glueqs.
+              '';
+            };
+
+            bar = {
+              enable = lib.mkEnableOption ''
+                glueqs, the Quickshell bar written for gluewc. Installs the
+                `glueqs` command with Quickshell and the tools its panels use,
+                turns on Bluetooth and UPower, and seeds new accounts with
+                `autostart = glueqs`. An existing ~/.config/gluewc/config.conf
+                needs that line added by hand
+              '';
+
+              package = lib.mkOption {
+                type = lib.types.package;
+                default = self.packages.${pkgs.stdenv.hostPlatform.system}.glueqs;
+                defaultText = lib.literalExpression "gluewc.packages.\${system}.glueqs";
+                description = "The glueqs package to install.";
+              };
             };
 
             audio = lib.mkOption {
@@ -195,6 +284,26 @@
                   "gtk"
                 ];
               })
+              (lib.mkIf cfg.bar.enable (
+                lib.mkMerge [
+                  {
+                    environment.systemPackages = [
+                      cfg.bar.package
+                    ]
+                    ++ (with pkgs; [
+                      curl
+                      bluez
+                      playerctl
+                      brightnessctl
+                      grim
+                      slurp
+                      wl-clipboard
+                    ]);
+                  }
+                  (setIfDeclared [ "hardware" "bluetooth" "enable" ] (lib.mkDefault true))
+                  (setIfDeclared [ "services" "upower" "enable" ] (lib.mkDefault true))
+                ]
+              ))
               (lib.mkIf cfg.audio (
                 lib.mkMerge [
                   (setFirstDeclared [
