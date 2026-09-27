@@ -75,8 +75,10 @@ curl -fsSL https://raw.githubusercontent.com/vladbiber/gluewc/main/install.sh | 
 ```
 
 **With the bar** — [glueqs](https://github.com/vladbiber/glueqs), a quickshell
-bar built for gluewc. Adds quickshell, clones the bar into
-`~/.config/quickshell/glueqs` and starts it from the session:
+bar built for gluewc. Installs Quickshell from the distribution, or builds it
+where there is no package (Chimera, Alpine, openSUSE), adds the tools its
+panels use, clones the bar into `~/.config/quickshell/glueqs` and starts it
+from the session:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/vladbiber/gluewc/main/install.sh | sh -s -- --with-bar
@@ -111,8 +113,9 @@ The dependency resolver covers current releases of:
 | SUSE | openSUSE Tumbleweed and Leap |
 | Gentoo | Gentoo Linux |
 | Alpine | Alpine Edge, postmarketOS |
+| Chimera | Chimera Linux (clang, musl, dinit; `doas` is used when there is no `sudo`) |
 | Void | Void Linux rolling |
-| NixOS | through the flake in this repository |
+| NixOS | through the flake in this repository, finix included |
 
 A distribution outside the list still works: the installer falls back to
 whichever package manager it finds on `PATH` and uses that family's package
@@ -138,6 +141,7 @@ the session and sets up PipeWire, the portals and Xwayland:
 ```nix
 imports = [ inputs.gluewc.nixosModules.default ];
 programs.gluewc.enable = true;
+programs.gluewc.bar.enable = true;   # the glueqs bar, with Quickshell from nixpkgs
 ```
 
 ### From source

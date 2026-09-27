@@ -45,12 +45,27 @@ prints that same list on its own.
 ### The bar
 
 `--with-bar` installs [glueqs](https://github.com/vladbiber/glueqs), a
-quickshell bar written for gluewc: it adds quickshell where the distribution
-packages it, clones the bar into `~/.config/quickshell/glueqs` (or pulls it if
-it is already there) and appends `autostart = qs -c glueqs` to your config,
-once. quickshell is packaged on Arch, Void, Fedora 44+, Debian 14 and unstable,
-Ubuntu 26.10+ and in Gentoo's GURU overlay; where it is missing the bar is
-still set up and the script tells you where to get the binary.
+quickshell bar written for gluewc: it installs Quickshell and the tools the
+bar's panels use (`curl` for the weather, `bluez` and `upower` for the
+Bluetooth and battery panels; NetworkManager is not forced on anyone, the Wi-Fi
+list just stays empty without `nmcli`), enables the Bluetooth daemon, clones
+the bar into `~/.config/quickshell/glueqs` (or pulls it if it is already there)
+and appends `autostart = qs -c glueqs` to your config, once.
+
+Quickshell is packaged on Arch and its derivatives (Artix carries it in
+`galaxy`, CachyOS in `extra`), Void, Fedora 44+, Debian 14 and unstable, Ubuntu
+26.10+ and in Gentoo's GURU overlay. Chimera, Alpine and openSUSE have no
+package, so there the installer builds Quickshell 0.3.1 from source into the
+prefix: it installs the Qt 6 development packages, fetches CLI11 where the
+distribution has none (it is header-only) and builds with the crash handler off
+so cpptrace is not needed. Quickshell uses private Qt API and has to be rebuilt
+when Qt is upgraded; `--update --with-bar` notices the Qt version moved and
+rebuilds it. On a distribution the script has no recipe for, the bar is still
+set up and the script says where to get the binary.
+
+The panels shell out to `bluetoothctl`, `nmcli`, `loginctl`, `udevadm` and
+`curl`; a session bus and D-Bus activation for UPower are all the rest needs,
+and `gluewc-session` provides the bus where there is no systemd user session.
 
 The default prefix is `/usr/local`; the display-manager entry is installed in
 `/usr/share/wayland-sessions`. Override `SESSIONDIR` when a distribution uses a
@@ -69,6 +84,7 @@ follow their parent automatically. Recognised outright:
 | suse | `zypper` | openSUSE Tumbleweed and Leap, SLED, SLES, GeckoLinux |
 | gentoo | `emerge` | Gentoo, Funtoo, Calculate, Redcore, Pentoo |
 | alpine | `apk` | Alpine Edge, postmarketOS |
+| chimera | `apk` (apk-tools 3) | Chimera Linux |
 | void | `xbps-install` | Void |
 | nixos | — | NixOS, through the flake (see below) |
 | finix | — | finix, through the flake (see below) |
@@ -76,6 +92,23 @@ follow their parent automatically. Recognised outright:
 finix reports `ID=nixos` on purpose, so that the NixOS tooling it reuses keeps
 working. It is recognised by the name in `/etc/os-release` instead, ahead of the
 nixos branch.
+
+Chimera reports `ID=chimera` and no `ID_LIKE`, so it is matched by name; a
+system with `apk` and no `/etc/os-release` is taken for Chimera when the
+package database sits under `/usr/lib/apk` and there is no
+`/etc/apk/repositories`, and for Alpine otherwise. Chimera is clang and musl,
+calls GNU make `gmake` (the installer uses whichever it finds), ships wlroots
+0.20 in its repositories and has `doas` rather than `sudo`; the installer uses
+`sudo`, then `doas`, then `run0`, whichever is there. Its PipeWire is enabled
+through the `pipewire-dinit` user services and `gluewc-session` starts the
+daemons itself where they are not running.
+
+Alongside the compositor the installer adds a terminal and a launcher, because
+the compiled defaults open `alacritty` on `Super+Return` and `rofi` on
+`Super+Space` and a session without them is an empty screen. Chimera packages
+neither, so it gets `foot` and `wmenu`; a config the installer seeds there is
+pointed at them, and an existing config gets a note naming the two binds to
+change.
 
 A distribution that matches none of these is not rejected: the installer looks
 for a package manager on `PATH` and uses the list of the family that owns it,
@@ -163,6 +196,17 @@ Module options:
 | `programs.gluewc.enable` | `false` | install gluewc and register its session |
 | `programs.gluewc.package` | this flake's package | swap in your own build |
 | `programs.gluewc.audio` | `true` | PipeWire with the ALSA and PulseAudio bridges |
+| `programs.gluewc.bar.enable` | `false` | the glueqs bar: `glueqs` on PATH (Quickshell from nixpkgs, the QML from this flake's `glueqs` input), `curl`, `bluez`, `upower`, `playerctl`, `brightnessctl`, `grim`, `slurp`, `wl-clipboard`, Bluetooth and UPower on, and `autostart = glueqs` in the config seeded for new accounts |
+| `programs.gluewc.bar.package` | this flake's `glueqs` | swap in your own build of the bar |
+
+With `bar.enable`, the default `package` becomes `gluewc-with-bar`, the same
+compositor whose shipped `config.def.conf` ends in `autostart = glueqs`, which
+is what `gluewc-session` copies at a user's first login. An account that
+already has `~/.config/gluewc/config.conf` adds that line itself. The bar's
+settings are written to `~/.config/glueqs/settings.json`, so the store path
+being read-only does not matter. The `glueqs` input is pinned in `flake.lock`;
+`nix flake update glueqs` moves it to the newest bar. `nix run
+github:vladbiber/glueqs` runs the bar on its own, from its own flake.
 
 Everything the module turns on uses `mkDefault`, so your own settings win. If
 you only want the package and none of the session wiring, skip the module and
@@ -213,6 +257,7 @@ is already there:
 
 ```nix
   programs.gluewc.enable = true;
+  programs.gluewc.bar.enable = true;   # the glueqs bar; drop it for a bare compositor
   environment.systemPackages = with pkgs; [ alacritty rofi ];
 ```
 

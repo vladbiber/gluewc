@@ -38,7 +38,9 @@ Usage: install.sh [options]
                    not have, and stop
   --with-bar       also set up glueqs, the quickshell shell built for gluewc
                    (bar, wallpaper, launcher, OSDs, notifications), and start
-                   it from the session. Works with --update too
+                   it from the session. Installs Quickshell from the package
+                   manager, or builds it where there is no package (Chimera,
+                   Alpine, openSUSE). Works with --update too
   --dry-run        print the package-manager command without running it
   --uninstall      remove gluewc from the selected prefix
   -h, --help       show this help
@@ -68,13 +70,19 @@ cleanup() {
 
 trap cleanup EXIT HUP INT TERM
 
+# sudo where it exists, else doas (Chimera, some Artix and Alpine systems),
+# else systemd's run0.
 run_root() {
 	if [ "$(id -u)" -eq 0 ]; then
 		"$@"
 	elif command -v sudo >/dev/null 2>&1; then
 		sudo "$@"
+	elif command -v doas >/dev/null 2>&1; then
+		doas "$@"
+	elif command -v run0 >/dev/null 2>&1; then
+		run0 "$@"
 	else
-		die "sudo is required for system installation"
+		die "sudo, doas or run0 is required for system installation"
 	fi
 }
 
@@ -209,46 +217,211 @@ config_report() {
 	printf 'applies the change on the spot, no restart needed.\n'
 }
 
-# quickshell is packaged on Arch, Void, Fedora 44+, Debian 14/unstable and
-# Ubuntu 26.10+, and lives in the GURU overlay on Gentoo. Older releases and
-# Alpine have nothing, so this is deliberately allowed to fail: the bar's
-# config is set up either way and the note below says where to get the binary.
-# curl fetches the weather, bluetoothctl and nmcli drive the network panel.
-# NetworkManager is not forced on anyone: the panel just stays empty without
-# it. The bar draws the wallpaper itself, so no wallpaper daemon is needed.
-install_bar_package() {
-	[ "$DRY_RUN" -eq 0 ] || return 0
-	case "$FAMILY" in
-	arch)   set -- pacman -S --needed --noconfirm quickshell curl bluez-utils ;;
-	debian) set -- apt-get install -y quickshell curl bluez ;;
-	fedora) set -- dnf install -y quickshell curl bluez ;;
-	void)   set -- xbps-install -Sy quickshell curl bluez ;;
-	alpine) set -- apk add curl bluez ;;
-	gentoo) set -- emerge --noreplace --ask=n net-misc/curl net-wireless/bluez ;;
-	suse)   set -- zypper --non-interactive install curl bluez ;;
-	*)      return 0 ;;
+# Quickshell is packaged on Arch and its derivatives (Artix carries it in
+# galaxy), Void, Fedora 44+, Debian 14/unstable and Ubuntu 26.10+, and lives
+# in the GURU overlay on Gentoo. Chimera, Alpine and openSUSE have no package,
+# so there it is built from source by build_quickshell below. The bar's
+# runtime helpers come along: curl fetches the weather, bluetoothctl and nmcli
+# drive the network panel (NetworkManager itself is not forced on anyone; the
+# Wi-Fi list just stays empty without it) and upower feeds the battery widget.
+# The bar draws the wallpaper itself, so no wallpaper daemon is needed.
+bar_packages() {
+	case "$1" in
+	arch)    printf 'quickshell curl bluez bluez-utils upower' ;;
+	debian)  printf 'quickshell curl bluez upower' ;;
+	fedora)  printf 'quickshell curl bluez upower' ;;
+	void)    printf 'quickshell curl bluez upower' ;;
+	alpine)  printf 'curl bluez upower' ;;
+	chimera) printf 'curl bluez upower' ;;
+	gentoo)  printf 'net-misc/curl net-wireless/bluez sys-power/upower' ;;
+	suse)    printf 'curl bluez upower' ;;
 	esac
-	run_root "$@" || warn "could not install the bar's packages from the package manager"
 }
 
-# The bar is written against upstream Quickshell (0.2 or newer). A fork that
-# carries extra modules works too, but a Quickshell that is too old does not,
-# and the error it prints then ("module not installed") is not obvious.
+# What building Quickshell 0.3 needs, where no package exists. CLI11 is not
+# packaged on Chimera or Alpine and is header-only, so it is installed from
+# source next to the build; the crash handler is left out so cpptrace is not
+# needed either. openSUSE has both but the same build works there too.
+quickshell_build_packages() {
+	case "$1" in
+	chimera) printf 'clang gmake cmake ninja pkgconf git qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel qt6-qtsvg-devel qt6-qtwayland-devel qt6-qtshadertools-devel spirv-tools vulkan-headers jemalloc-devel pipewire-devel polkit-devel linux-pam-devel libxcb-devel wayland-devel wayland-protocols libdrm-devel mesa-devel' ;;
+	alpine)  printf 'cmake ninja pkgconf git qt6-qtbase-private-dev qt6-qtdeclarative-private-dev qt6-qtsvg-dev qt6-qtwayland-dev qt6-qtshadertools-dev spirv-tools vulkan-headers jemalloc-dev pipewire-dev polkit-dev linux-pam-dev libxcb-dev wayland-dev wayland-protocols libdrm-dev mesa-dev' ;;
+	suse)    printf 'cmake ninja pkg-config git cli11-devel qt6-base-private-devel qt6-declarative-private-devel qt6-svg-devel qt6-wayland-private-devel qt6-shadertools-devel spirv-tools vulkan-headers jemalloc-devel pipewire-devel polkit-devel pam-devel libxcb-devel wayland-devel wayland-protocols-devel libdrm-devel' ;;
+	esac
+}
+
+pm_install_cmd() {
+	case "$FAMILY" in
+	arch)    printf 'pacman -S --needed --noconfirm' ;;
+	debian)  printf 'apt-get install -y' ;;
+	fedora)  printf 'dnf install -y' ;;
+	suse)    printf 'zypper --non-interactive install' ;;
+	gentoo)  printf 'emerge --noreplace --ask=n' ;;
+	alpine)  printf 'apk add' ;;
+	chimera) printf 'apk add' ;;
+	void)    printf 'xbps-install -Sy' ;;
+	esac
+}
+
+# One command for the lot; if that fails, each package on its own, so a
+# single name the repositories do not have (or a mirror hiccup on one of
+# them) does not take the rest down with it. Whatever still fails is named.
+install_list() {
+	cmd=$(pm_install_cmd)
+	[ -n "$cmd" ] || return 0
+	[ -n "$*" ] || return 0
+	if [ "$DRY_RUN" -eq 1 ]; then
+		show_command $cmd "$@"
+		return 0
+	fi
+	# shellcheck disable=SC2086
+	run_root $cmd "$@" && return 0
+	failed=
+	for p in "$@"; do
+		# shellcheck disable=SC2086
+		run_root $cmd "$p" >/dev/null 2>&1 || failed="$failed $p"
+	done
+	[ -z "$failed" ] || warn "could not install:$failed"
+	return 0
+}
+
+have_qs() {
+	command -v qs >/dev/null 2>&1 || command -v quickshell >/dev/null 2>&1 \
+		|| [ -x "$PREFIX/bin/qs" ]
+}
+
+# Quickshell from source, into $PREFIX. Only reached when the packages above
+# left no qs behind. Quickshell needs private Qt headers and must be rebuilt
+# whenever Qt is updated; the Qt version it was built against is recorded so
+# --update can tell when that is due.
+QUICKSHELL_VERSION=0.3.1
+CLI11_VERSION=2.5.0
+build_quickshell() {
+	deps=$(quickshell_build_packages "$FAMILY")
+	if [ -z "$deps" ]; then
+		warn "no Quickshell package for '${ID:-unknown}' and no build recipe for family '$FAMILY'"
+		warn "get it from https://quickshell.org; the bar is configured already"
+		warn "and starts as soon as qs is on PATH"
+		return 0
+	fi
+	log "Building Quickshell $QUICKSHELL_VERSION (no package on ${PRETTY_NAME:-$FAMILY})"
+	install_list $deps
+	[ "$DRY_RUN" -eq 0 ] || return 0
+	for tool in cmake ninja git; do
+		command -v "$tool" >/dev/null 2>&1 || { warn "missing $tool, Quickshell not built"; return 0; }
+	done
+	qsdir=$WORKDIR/quickshell
+	if ! pkg-config --exists CLI11 2>/dev/null \
+			&& [ ! -f "$PREFIX/lib/cmake/CLI11/CLI11Config.cmake" ] \
+			&& [ ! -f "$PREFIX/share/cmake/CLI11/CLI11Config.cmake" ] \
+			&& [ ! -f /usr/lib/cmake/CLI11/CLI11Config.cmake ] \
+			&& [ ! -f /usr/lib64/cmake/CLI11/CLI11Config.cmake ] \
+			&& [ ! -f /usr/share/cmake/CLI11/CLI11Config.cmake ]; then
+		git clone --quiet --depth 1 --branch "v$CLI11_VERSION" \
+			https://github.com/CLIUtils/CLI11.git "$WORKDIR/cli11" || return 0
+		cmake -S "$WORKDIR/cli11" -B "$WORKDIR/cli11/build" -Wno-dev \
+			-DCLI11_BUILD_TESTS=OFF -DCLI11_BUILD_EXAMPLES=OFF \
+			-DCLI11_BUILD_DOCS=OFF -DCLI11_PRECOMPILED=OFF \
+			-DCMAKE_INSTALL_PREFIX="$PREFIX" >/dev/null || return 0
+		run_root cmake --install "$WORKDIR/cli11/build" >/dev/null || return 0
+	fi
+	git clone --quiet --depth 1 --branch "v$QUICKSHELL_VERSION" \
+		https://github.com/quickshell-mirror/quickshell.git "$qsdir" \
+		|| { warn "could not fetch Quickshell"; return 0; }
+	# clang rejects Quickshell's precompiled header once a target adds
+	# -pthread ("POSIX thread support was disabled in precompiled file"),
+	# so the header is skipped there
+	pch=OFF
+	case "$(cc --version 2>/dev/null | head -n1)" in *clang*) pch=ON ;; esac
+	if ! cmake -G Ninja -S "$qsdir" -B "$qsdir/build" -Wno-dev \
+			-DCMAKE_BUILD_TYPE=Release -DCRASH_HANDLER=OFF -DNO_PCH=$pch \
+			-DDISTRIBUTOR="gluewc install.sh" \
+			-DCMAKE_INSTALL_PREFIX="$PREFIX" \
+			-DINSTALL_QML_PREFIX=lib/qt6/qml \
+			-DCMAKE_PREFIX_PATH="$PREFIX"; then
+		warn "Quickshell did not configure; the bar needs qs on PATH"
+		return 0
+	fi
+	cmake --build "$qsdir/build" || { warn "Quickshell did not build"; return 0; }
+	run_root cmake --install "$qsdir/build" >/dev/null || return 0
+	# a fresh shell would find it; this one has not looked in $PREFIX/bin yet
+	hash -r 2>/dev/null || true
+	qtver=$(pkg-config --modversion Qt6Core 2>/dev/null || printf unknown)
+	run_root sh -c "mkdir -p '$PREFIX/share/gluewc' && printf '%s\n' '$qtver' > '$PREFIX/share/gluewc/quickshell-qt-version'"
+	log "Quickshell $QUICKSHELL_VERSION installed to $PREFIX/bin/qs (built against Qt $qtver)"
+}
+
+# A Quickshell built here against one Qt stops working after a Qt upgrade
+# (it uses private Qt API), so --update rebuilds it when the version moved.
+quickshell_stale() {
+	f=$PREFIX/share/gluewc/quickshell-qt-version
+	[ -r "$f" ] || return 1
+	[ "$(cat "$f")" != "$(pkg-config --modversion Qt6Core 2>/dev/null)" ]
+}
+
+# The bar is written against Quickshell 0.2 or newer. The noctalia-qs fork
+# reports its own 0.0.x numbers and is fine, so only upstream's version is
+# checked; an old upstream fails with "module not installed", which is not
+# an obvious message.
 check_bar_runtime() {
 	qs=$(command -v qs 2>/dev/null || command -v quickshell 2>/dev/null) || return 0
 	ver=$("$qs" --version 2>/dev/null | head -n1)
 	case "$ver" in
-	*" 0.0."*|*" 0.1."*)
+	[Qq]uickshell" 0.0."*|[Qq]uickshell" 0.1."*)
 		warn "$ver is older than the bar needs (Quickshell 0.2+); update it"
 		;;
 	esac
+}
+
+# The bar's panels talk to daemons on the system bus. systemd systems have
+# them socket- or D-Bus-activated; on OpenRC, runit, dinit and s6 the
+# Bluetooth daemon needs enabling by hand, and it is the one thing the panel
+# cannot do without. Everything else (upower, polkit) is D-Bus activated.
+enable_bar_services() {
+	[ "$DRY_RUN" -eq 0 ] || return 0
+	if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+		run_root systemctl enable --now bluetooth.service >/dev/null 2>&1 || true
+		return 0
+	fi
+	if command -v rc-update >/dev/null 2>&1; then
+		[ "$FAMILY" = arch ] && install_list bluez-openrc
+		[ -e /etc/init.d/bluetoothd ] && run_root rc-update add bluetoothd default >/dev/null 2>&1
+		[ -e /etc/init.d/bluetooth ] && run_root rc-update add bluetooth default >/dev/null 2>&1
+	elif [ -d /etc/runit/sv ] || [ -d /etc/sv ]; then
+		[ "$FAMILY" = arch ] && install_list bluez-runit
+		for svdir in /etc/runit/sv /etc/sv; do
+			for name in bluetoothd bluetooth; do
+				if [ -d "$svdir/$name" ]; then
+					target=/run/runit/service
+					[ -d "$target" ] || target=/var/service
+					[ -d "$target" ] && [ ! -e "$target/$name" ] \
+						&& run_root ln -s "$svdir/$name" "$target/$name" 2>/dev/null
+				fi
+			done
+		done
+	elif command -v dinitctl >/dev/null 2>&1; then
+		[ "$FAMILY" = arch ] && install_list bluez-dinit
+		[ "$FAMILY" = chimera ] && install_list bluez-dinit
+		run_root dinitctl enable bluetoothd >/dev/null 2>&1 \
+			|| run_root dinitctl enable bluetooth >/dev/null 2>&1 || true
+	elif command -v s6-service >/dev/null 2>&1; then
+		[ "$FAMILY" = arch ] && install_list bluez-s6
+		run_root s6-service add default bluetoothd >/dev/null 2>&1 && run_root s6-db-reload >/dev/null 2>&1 || true
+	fi
+	return 0
 }
 
 install_bar() {
 	bardir=${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/glueqs
 
 	log "Setting up the glueqs bar"
-	install_bar_package
+	# shellcheck disable=SC2046
+	install_list $(bar_packages "$FAMILY")
+	if ! have_qs || { [ "$UPDATE" -eq 1 ] && quickshell_stale; }; then
+		build_quickshell
+	fi
+	enable_bar_services
+	[ "$DRY_RUN" -eq 0 ] || return 0
 	if [ -d "$bardir/.git" ]; then
 		git -C "$bardir" pull --ff-only || warn "could not update $bardir"
 	else
@@ -259,10 +432,7 @@ install_bar() {
 
 	# The session writes the config at first login; seed it now so the
 	# autostart line has somewhere to live.
-	if [ ! -r "$USER_CONFIG" ] && [ -r "$SOURCE_DIR/config.def.conf" ]; then
-		mkdir -p "$(dirname "$USER_CONFIG")"
-		cp "$SOURCE_DIR/config.def.conf" "$USER_CONFIG"
-	fi
+	seed_config
 	# Upstream installs both names and every distribution that packages it
 	# keeps them, but start whichever one is actually here rather than
 	# assuming, and fall back to the short one when nothing is installed yet.
@@ -270,15 +440,14 @@ install_bar() {
 	if ! command -v qs >/dev/null 2>&1 && command -v quickshell >/dev/null 2>&1; then
 		barcmd=quickshell
 	fi
-	if [ -r "$USER_CONFIG" ] && ! grep -qE '^[[:space:]]*autostart[[:space:]]*=[[:space:]]*(qs|quickshell) -c glueqs' "$USER_CONFIG"; then
+	if [ -r "$USER_CONFIG" ] && ! grep -qE '^[[:space:]]*autostart[[:space:]]*=[[:space:]]*(qs|quickshell|glueqs)( |$)' "$USER_CONFIG"; then
 		printf '\n# the glueqs bar, added by install.sh --with-bar\nautostart = %s -c glueqs\n' "$barcmd" >> "$USER_CONFIG"
 		log "Added 'autostart = $barcmd -c glueqs' to $USER_CONFIG"
 	fi
 
-	if ! command -v qs >/dev/null 2>&1 && ! command -v quickshell >/dev/null 2>&1; then
-		warn "quickshell is not installed and your distribution does not package it"
-		warn "get it from https://quickshell.outfoxxed.me — the bar is configured"
-		warn "already and starts as soon as the binary is on PATH"
+	if ! have_qs; then
+		warn "quickshell is not installed: the bar is configured and starts as"
+		warn "soon as qs is on PATH (https://quickshell.org)"
 	else
 		check_bar_runtime
 	fi
@@ -367,7 +536,13 @@ family_by_pm() {
 	elif command -v xbps-install >/dev/null 2>&1; then
 		printf 'void'
 	elif command -v apk >/dev/null 2>&1; then
-		printf 'alpine'
+		# Chimera keeps its repositories under apk's own directory and has
+		# no /etc/apk/repositories file; Alpine has the file.
+		if [ -d /usr/lib/apk/db ] && [ ! -e /etc/apk/repositories ]; then
+			printf 'chimera'
+		else
+			printf 'alpine'
+		fi
 	else
 		printf 'unknown'
 	fi
@@ -404,6 +579,8 @@ detect_family() {
 		printf 'suse' ;;
 	*gentoo*|*funtoo*|*calculate*|*redcore*|*pentoo*)
 		printf 'gentoo' ;;
+	*chimera*)
+		printf 'chimera' ;;
 	*alpine*|*postmarketos*)
 		printf 'alpine' ;;
 	*void*)
@@ -427,6 +604,7 @@ audio_packages() {
 	suse)   printf 'pipewire wireplumber pipewire-pulseaudio pipewire-alsa' ;;
 	gentoo) printf 'media-video/pipewire media-video/wireplumber' ;;
 	alpine) printf 'pipewire wireplumber pipewire-pulse pipewire-alsa' ;;
+	chimera) printf 'pipewire wireplumber pipewire-alsa pipewire-dinit' ;;
 	void)   printf 'pipewire wireplumber alsa-pipewire' ;;
 	esac
 }
@@ -457,6 +635,7 @@ To INSTALL it, add the flake to /etc/finix and enable the module:
   inputs.gluewc.url = "github:vladbiber/gluewc";
   imports = [ inputs.gluewc.nixosModules.default ];
   programs.gluewc.enable = true;
+  programs.gluewc.bar.enable = true;          # the glueqs bar, autostarted
 
 then rebuild with 'finix-rebuild switch' and pick gluewc in your greeter.
 The module notices that finix has
@@ -484,8 +663,56 @@ session_packages() {
 	suse)   printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
 	gentoo) printf 'gui-apps/grim gui-apps/slurp gui-apps/wl-clipboard media-sound/playerctl dev-libs/light sys-apps/xdg-desktop-portal gui-libs/xdg-desktop-portal-wlr' ;;
 	alpine) printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
+	chimera) printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
 	void)   printf 'grim slurp wl-clipboard playerctl brightnessctl xdg-desktop-portal xdg-desktop-portal-wlr' ;;
 	esac
+}
+
+# The compiled defaults open alacritty on Super+Return and rofi on
+# Super+Space; without a terminal and a launcher the session is a working
+# but empty screen. Both are installed where the distribution has them.
+# Chimera packages neither, so it gets foot and wmenu and the seeded config
+# is pointed at those (see seed_config); an existing config is never edited.
+TERMINAL_CMD=alacritty
+LAUNCHER_CMD='rofi -show drun'
+[ "$FAMILY" != chimera ] || { TERMINAL_CMD=foot; LAUNCHER_CMD=wmenu-run; }
+app_packages() {
+	case "$1" in
+	arch|debian|fedora|suse|alpine|void) printf 'alacritty rofi' ;;
+	gentoo)  printf 'x11-terms/alacritty x11-misc/rofi' ;;
+	chimera) printf 'foot wmenu' ;;
+	esac
+}
+
+# Copy the shipped defaults into place when there is no personal config yet,
+# with the terminal and launcher swapped for the ones this system got. The
+# session would do the same copy at first login, minus the swap.
+seed_config() {
+	[ ! -r "$USER_CONFIG" ] || return 0
+	[ -r "$SOURCE_DIR/config.def.conf" ] || return 0
+	mkdir -p "$(dirname "$USER_CONFIG")"
+	if [ "$TERMINAL_CMD" = alacritty ] && [ "$LAUNCHER_CMD" = 'rofi -show drun' ]; then
+		cp "$SOURCE_DIR/config.def.conf" "$USER_CONFIG"
+	else
+		sed -e "s/= spawn:alacritty\$/= spawn:$TERMINAL_CMD/" \
+			-e "s/= spawn:rofi -show drun\$/= spawn:$LAUNCHER_CMD/" \
+			"$SOURCE_DIR/config.def.conf" > "$USER_CONFIG"
+		log "Seeded $USER_CONFIG with $TERMINAL_CMD and $LAUNCHER_CMD as terminal and launcher"
+	fi
+}
+
+# An existing config that still names programs this system does not have.
+report_apps() {
+	[ -r "$USER_CONFIG" ] || return 0
+	[ "$TERMINAL_CMD" = alacritty ] && [ "$LAUNCHER_CMD" = 'rofi -show drun' ] && return 0
+	if grep -qE '^[[:space:]]*bind_insert.*= spawn:alacritty$' "$USER_CONFIG" && ! command -v alacritty >/dev/null 2>&1; then
+		warn "$USER_CONFIG opens alacritty, which ${PRETTY_NAME:-this system} does not package;"
+		warn "change the 'spawn:alacritty' binds to 'spawn:$TERMINAL_CMD'"
+	fi
+	if grep -qE '^[[:space:]]*bind_insert.*= spawn:rofi -show drun$' "$USER_CONFIG" && ! command -v rofi >/dev/null 2>&1; then
+		warn "$USER_CONFIG launches with rofi, which ${PRETTY_NAME:-this system} does not package;"
+		warn "change the 'spawn:rofi -show drun' bind to 'spawn:$LAUNCHER_CMD'"
+	fi
 }
 
 nixos_instructions() {
@@ -514,6 +741,7 @@ To INSTALL it, add the flake to your configuration and enable the module:
   inputs.gluewc.url = "github:vladbiber/gluewc";
   imports = [ inputs.gluewc.nixosModules.default ];
   programs.gluewc.enable = true;              # session entry + PipeWire audio
+  programs.gluewc.bar.enable = true;          # the glueqs bar, autostarted
 
 docs/INSTALL.md has the full configuration.nix example. Inside a
 'nix develop' shell this script still works with --no-deps.
@@ -566,9 +794,9 @@ install_packages() {
 		set -- zypper --non-interactive install -t pattern devel_basis \
 			git meson ninja pkg-config wayland-devel wayland-protocols-devel \
 			libinput-devel libxkbcommon-devel pixman-devel libdrm-devel \
-			Mesa-libgbm-devel Mesa-libEGL-devel Mesa-libGLESv2-devel \
-			libseat-devel libdisplay-info-devel libliftoff-devel \
-			libudev-devel libxcb-devel xcb-util-wm-devel \
+			libgbm-devel Mesa-libEGL-devel Mesa-libGLESv2-devel \
+			seatd-devel libdisplay-info-devel libliftoff-devel \
+			systemd-devel libxcb-devel xcb-util-wm-devel \
 			xcb-util-errors-devel xcb-util-renderutil-devel xwayland
 		;;
 	gentoo)
@@ -594,6 +822,16 @@ install_packages() {
 			libdisplay-info-dev libliftoff-dev hwdata wlroots0.20-dev \
 			xwayland
 		;;
+	chimera)
+		# Chimera is clang and musl, ships wlroots 0.20 and calls GNU make
+		# gmake; base-devel is only a marker package there.
+		set -- apk add clang gmake git meson ninja pkgconf wayland-devel \
+			wayland-protocols libinput-devel libxkbcommon-devel libxcb-devel \
+			xcb-util-wm-devel xcb-util-errors-devel xcb-util-renderutil-devel \
+			libdrm-devel mesa-devel pixman-devel libseat-devel \
+			libdisplay-info-devel libliftoff-devel hwdata wlroots0.20-devel \
+			xwayland
+		;;
 	void)
 		set -- xbps-install -Sy base-devel git meson ninja pkg-config \
 			wayland-devel wayland-protocols libinput-devel \
@@ -616,10 +854,16 @@ install_packages() {
 	esac
 
 	# shellcheck disable=SC2046  # the package lists are deliberately split
-	set -- "$@" $(audio_packages "$FAMILY") $(session_packages "$FAMILY")
+	set -- "$@" $(audio_packages "$FAMILY") $(session_packages "$FAMILY") $(app_packages "$FAMILY")
 
 	if [ "$DRY_RUN" -eq 1 ]; then
 		show_command "$@"
+		if [ "$WITH_BAR" -eq 1 ]; then
+			# shellcheck disable=SC2046
+			install_list $(bar_packages "$FAMILY")
+			have_qs || [ -z "$(quickshell_build_packages "$FAMILY")" ] \
+				|| install_list $(quickshell_build_packages "$FAMILY")
+		fi
 	else
 		run_root "$@"
 	fi
@@ -683,7 +927,10 @@ if [ "$WITH_DEPS" -eq 1 ]; then
 	stable_audio_config
 fi
 
-for tool in cc make git meson ninja pkg-config; do
+# Chimera installs GNU make as gmake and nothing as make.
+MAKE=$(command -v gmake 2>/dev/null || command -v make 2>/dev/null || true)
+[ -n "$MAKE" ] || die "missing tool: make"
+for tool in cc git meson ninja pkg-config; do
 	command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool"
 done
 
@@ -703,6 +950,14 @@ check_source_requirements() {
 }
 
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/gluewc-install.XXXXXX")
+
+# SceneFX's headers use glibc's __always_inline, which musl does not define;
+# Chimera and Alpine get it spelled out for the SceneFX build and for gluewc,
+# which includes those headers.
+EXTRA_CFLAGS=
+if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
+	EXTRA_CFLAGS='-D__always_inline=inline'
+fi
 
 # Arch, Alpine and Void ship wlroots 0.20; everywhere else it is built here.
 # No distribution packages SceneFX 0.5 yet, so that one is always built unless
@@ -730,7 +985,7 @@ if ! pkg-config --exists scenefx-0.5; then
 		https://github.com/wlrfx/scenefx.git "$WORKDIR/scenefx"
 	meson setup "$WORKDIR/scenefx/build" "$WORKDIR/scenefx" \
 		--prefix="$PREFIX" --libdir=lib --buildtype=release \
-		-Dexamples=false -Dwerror=false
+		-Dexamples=false -Dwerror=false ${EXTRA_CFLAGS:+-Dc_args=$EXTRA_CFLAGS}
 	meson compile -C "$WORKDIR/scenefx/build"
 	run_root meson install -C "$WORKDIR/scenefx/build"
 fi
@@ -758,13 +1013,14 @@ JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')
 RPATH_FLAGS="-Wl,-rpath,$PREFIX/lib -Wl,-rpath,$PREFIX/lib64"
 
 log "Building gluewc"
-make -C "$SOURCE_DIR" clean
-make -C "$SOURCE_DIR" -j"$JOBS" PREFIX="$PREFIX" SESSIONDIR="$SESSIONDIR" \
-	LDFLAGS="$RPATH_FLAGS"
+"$MAKE" -C "$SOURCE_DIR" clean
+"$MAKE" -C "$SOURCE_DIR" -j"$JOBS" PREFIX="$PREFIX" SESSIONDIR="$SESSIONDIR" \
+	LDFLAGS="$RPATH_FLAGS" CFLAGS="$EXTRA_CFLAGS"
 
 log "Installing gluewc to $PREFIX"
-run_install make -C "$SOURCE_DIR" install PREFIX="$PREFIX" \
-	SESSIONDIR="$SESSIONDIR" DESTDIR="$DESTDIR" LDFLAGS="$RPATH_FLAGS"
+run_install "$MAKE" -C "$SOURCE_DIR" install PREFIX="$PREFIX" \
+	SESSIONDIR="$SESSIONDIR" DESTDIR="$DESTDIR" LDFLAGS="$RPATH_FLAGS" \
+	CFLAGS="$EXTRA_CFLAGS"
 
 if [ "$UPDATE" -eq 1 ]; then
 	printf '\n\033[1;32mgluewc is up to date.\033[0m Log out and back in to run the new build.\n'
@@ -775,6 +1031,12 @@ fi
 
 if [ "$WITH_BAR" -eq 1 ]; then
 	install_bar
+fi
+if [ "$WITH_DEPS" -eq 1 ]; then
+	# a fresh system gets its config now, with the terminal and launcher
+	# that were just installed
+	seed_config
+	report_apps
 fi
 
 config_report "$SOURCE_DIR/config.def.conf" "$USER_CONFIG"

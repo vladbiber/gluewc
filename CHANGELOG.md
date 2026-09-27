@@ -4,6 +4,28 @@
 
 ### Added
 
+- `install.sh --with-bar` now leaves a bar that starts: Quickshell comes from
+  the distribution where it is packaged (Artix has it in `galaxy`, CachyOS in
+  `extra`) and is built from source into the prefix everywhere else (Chimera,
+  Alpine, openSUSE), with CLI11 fetched when the distribution has none and the
+  crash handler left out so cpptrace is not needed. The bar's helpers come
+  along (`curl`, `bluez`, `upower`), the Bluetooth daemon is enabled on OpenRC,
+  runit, dinit, s6 and systemd, `--dry-run` shows the bar's packages, and the
+  version check no longer flags the noctalia-qs fork. `--update` rebuilds a
+  Quickshell built here when Qt moved under it
+- Chimera Linux: recognised as its own family (clang, musl, `gmake`, dinit,
+  `doas`), with wlroots 0.20 from its repositories and SceneFX, gluewc and
+  Quickshell built on top. `foot` and `wmenu` stand in for alacritty and rofi,
+  which Chimera does not package, and a config seeded by the installer is
+  pointed at them
+- The installer installs a terminal and a launcher (alacritty and rofi) with
+  the compositor, since the compiled defaults open them and a session without
+  them is an empty screen; `doas` and `run0` work where there is no `sudo`
+- NixOS and finix: `programs.gluewc.bar.enable` installs `glueqs` (the QML tree
+  packaged from this flake's `glueqs` input, run by the Quickshell in nixpkgs),
+  the tools its panels use, Bluetooth and UPower, and seeds new accounts with
+  `autostart = glueqs`. `packages.glueqs` and `packages.gluewc-with-bar` are
+  exposed too
 - Monitors are configured from the config file and applied live: `output =
   NAME mode=... pos=... scale=... transform=... enabled=... mirror=...`, with
   `*` for every output without a line of its own. Mirroring shows a monitor's
