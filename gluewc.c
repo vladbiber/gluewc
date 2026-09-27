@@ -291,6 +291,9 @@ struct Monitor {
 	float overview_dim, overview_dim_from, overview_dim_to;
 	float overview_anim_t;
 	int overview_animating;
+	char mirror_of[64]; /* configured source, "" for none */
+	Monitor *mirror_src; /* the source it copies right now, or NULL */
+	int mirroring;
 };
 
 typedef struct {
@@ -299,6 +302,23 @@ typedef struct {
 	enum wl_output_transform rr;
 	int x, y;
 } MonitorRule;
+
+/* one "output = NAME key=value ..." line; later lines for the same name
+ * override earlier ones key by key, "*" covers outputs without their own */
+typedef struct {
+	char name[64];
+	int line;
+	int has_mode, mw, mh, mhz; /* mw 0 = preferred, mhz 0 = any refresh */
+	int has_pos, pos_auto, x, y;
+	int has_scale;
+	float scale;
+	int has_transform;
+	enum wl_output_transform transform;
+	int has_enabled, enabled;
+	int has_mirror;
+	char mirror[64];
+	int has_vrr, vrr;
+} OutputCfg;
 
 typedef struct {
 	struct wlr_pointer_constraint_v1 *constraint;
@@ -493,6 +513,19 @@ static void movewsstep(const Arg *arg);
 static void outputmgrapply(struct wl_listener *listener, void *data);
 static void outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test);
 static void outputmgrtest(struct wl_listener *listener, void *data);
+static void applyoutputcfg(Monitor *m);
+static void applyoutputcfgs(void);
+static void cfgoutput(char *v);
+static void cfgoutputcheck(void);
+static Monitor *monbyname(const char *name);
+static Monitor *mirrorsource(Monitor *m);
+static void mirrorstart(Monitor *m);
+static void mirrorstop(Monitor *m);
+static void mirrorfit(Monitor *m, Monitor *src);
+static void placemirrors(void);
+static void outcfgmerged(const char *name, OutputCfg *out);
+static void saveoutputstate(void);
+static const char *transformname(enum wl_output_transform t);
 static void overviewbuild(void);
 static void overviewtouch(Client *c);
 static void overviewframes(Monitor *m, struct timespec *now);
@@ -605,6 +638,8 @@ static Bind *runkeys, *runnormalkeys;
 static size_t nrunkeys, nrunnormalkeys;
 static char **autostarts;
 static size_t nautostarts;
+static OutputCfg *outcfgs;
+static size_t noutcfgs;
 static char xkb_layout_buf[64], xkb_variant_buf[64], xkb_options_buf[128];
 
 /* status bar IPC (dwl-ipc-unstable-v2, same protocol mmsg/waybar speak) */
@@ -1374,7 +1409,7 @@ arrange(Monitor *m)
 {
 	Client *c, *fs = NULL;
 
-	if (!m->wlr_output->enabled)
+	if (!m->wlr_output->enabled || m->mirroring)
 		return;
 
 	/* a fullscreen client (real or fake) is shown alone on its workspace;
@@ -1447,7 +1482,7 @@ arrangelayers(Monitor *m)
 		ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
 		ZWLR_LAYER_SHELL_V1_LAYER_TOP,
 	};
-	if (!m->wlr_output->enabled)
+	if (!m->wlr_output->enabled || m->mirroring)
 		return;
 
 	/* Arrange exclusive surfaces from top->bottom */
@@ -3478,6 +3513,7 @@ cleanupmon(struct wl_listener *listener, void *data)
 	closeanimclear(m);
 	wlr_scene_node_destroy(&m->fullscreen_bg->node);
 	free(m);
+	saveoutputstate();
 }
 
 void
@@ -3528,16 +3564,16 @@ closemon(Monitor *m)
 	/* update selmon if needed and
 	 * move closed monitor's clients to the focused one */
 	Client *c;
-	int i = 0, nmons = wl_list_length(&mons);
-	if (!nmons) {
+	Monitor *n;
+	if (m == selmon) {
+		/* the first monitor that is on and shows something of its own */
 		selmon = NULL;
-	} else if (m == selmon) {
-		do /* don't switch to disabled mons */
-			selmon = wl_container_of(mons.next, selmon, link);
-		while (!selmon->wlr_output->enabled && i++ < nmons);
-
-		if (!selmon->wlr_output->enabled)
-			selmon = NULL;
+		wl_list_for_each(n, &mons, link) {
+			if (n != m && n->wlr_output->enabled && !n->mirroring) {
+				selmon = n;
+				break;
+			}
+		}
 	}
 
 	wl_list_for_each(c, &clients, link) {
@@ -3796,6 +3832,12 @@ createlayersurface(struct wl_listener *listener, void *data)
 		wlr_layer_surface_v1_destroy(layer_surface);
 		return;
 	}
+	/* a mirror shows the source's bar already */
+	if (layer_surface->output->data
+			&& ((Monitor *)layer_surface->output->data)->mirroring) {
+		wlr_layer_surface_v1_destroy(layer_surface);
+		return;
+	}
 
 	l = layer_surface->data = ecalloc(1, sizeof(*l));
 	l->type = LayerShell;
@@ -3836,15 +3878,542 @@ createlocksurface(struct wl_listener *listener, void *data)
 		client_notify_enter(lock_surface->surface, wlr_seat_get_keyboard(seat));
 }
 
+const char *
+transformname(enum wl_output_transform t)
+{
+	switch (t) {
+	case WL_OUTPUT_TRANSFORM_90: return "90";
+	case WL_OUTPUT_TRANSFORM_180: return "180";
+	case WL_OUTPUT_TRANSFORM_270: return "270";
+	case WL_OUTPUT_TRANSFORM_FLIPPED: return "flipped";
+	case WL_OUTPUT_TRANSFORM_FLIPPED_90: return "flipped-90";
+	case WL_OUTPUT_TRANSFORM_FLIPPED_180: return "flipped-180";
+	case WL_OUTPUT_TRANSFORM_FLIPPED_270: return "flipped-270";
+	default: return "normal";
+	}
+}
+
+static int
+parsetransform(const char *s, enum wl_output_transform *t)
+{
+	static const struct { const char *name; enum wl_output_transform t; } map[] = {
+		{"normal", WL_OUTPUT_TRANSFORM_NORMAL}, {"90", WL_OUTPUT_TRANSFORM_90},
+		{"180", WL_OUTPUT_TRANSFORM_180}, {"270", WL_OUTPUT_TRANSFORM_270},
+		{"flipped", WL_OUTPUT_TRANSFORM_FLIPPED},
+		{"flipped-90", WL_OUTPUT_TRANSFORM_FLIPPED_90},
+		{"flipped-180", WL_OUTPUT_TRANSFORM_FLIPPED_180},
+		{"flipped-270", WL_OUTPUT_TRANSFORM_FLIPPED_270},
+	};
+	size_t i;
+
+	for (i = 0; i < LENGTH(map); i++) {
+		if (!strcmp(s, map[i].name)) {
+			*t = map[i].t;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int
+parsebool(const char *s)
+{
+	return !strcmp(s, "true") || !strcmp(s, "1") || !strcmp(s, "on")
+			|| !strcmp(s, "yes");
+}
+
+static OutputCfg *
+outcfgentry(const char *name)
+{
+	size_t i;
+
+	for (i = 0; i < noutcfgs; i++)
+		if (!strcmp(outcfgs[i].name, name))
+			return &outcfgs[i];
+	if (!(outcfgs = realloc(outcfgs, (noutcfgs + 1) * sizeof(*outcfgs))))
+		die("config: realloc:");
+	memset(&outcfgs[noutcfgs], 0, sizeof(*outcfgs));
+	snprintf(outcfgs[noutcfgs].name, sizeof outcfgs[noutcfgs].name, "%s", name);
+	return &outcfgs[noutcfgs++];
+}
+
+void
+cfgoutput(char *v)
+{
+	OutputCfg *o;
+	char *tok, *eq, *save = NULL;
+
+	if (!(tok = strtok_r(v, " \t", &save))) {
+		cfgerror("output needs a name");
+		return;
+	}
+	o = outcfgentry(tok);
+	o->line = cfg_curline;
+	while ((tok = strtok_r(NULL, " \t", &save))) {
+		if (!(eq = strchr(tok, '='))) {
+			cfgerror("output %s: expected key=value, got '%s'", o->name, tok);
+			continue;
+		}
+		*eq++ = '\0';
+		if (!strcmp(tok, "mode")) {
+			int w, h;
+			float hz = 0;
+			if (!strcmp(eq, "preferred")) {
+				o->has_mode = 1;
+				o->mw = o->mh = o->mhz = 0;
+			} else if (sscanf(eq, "%dx%d@%f", &w, &h, &hz) >= 2 && w > 0 && h > 0) {
+				o->has_mode = 1;
+				o->mw = w;
+				o->mh = h;
+				o->mhz = (int)(hz * 1000.0f + 0.5f);
+			} else {
+				cfgerror("output %s: bad mode '%s'", o->name, eq);
+			}
+		} else if (!strcmp(tok, "pos")) {
+			int x, y;
+			if (!strcmp(eq, "auto")) {
+				o->has_pos = 1;
+				o->pos_auto = 1;
+			} else if (sscanf(eq, "%d,%d", &x, &y) == 2) {
+				o->has_pos = 1;
+				o->pos_auto = 0;
+				o->x = x;
+				o->y = y;
+			} else {
+				cfgerror("output %s: bad pos '%s'", o->name, eq);
+			}
+		} else if (!strcmp(tok, "scale")) {
+			float s = strtof(eq, NULL);
+			if (s < 0.1f || s > 10.0f) {
+				cfgerror("output %s: bad scale '%s'", o->name, eq);
+			} else {
+				o->has_scale = 1;
+				o->scale = s;
+			}
+		} else if (!strcmp(tok, "transform")) {
+			if (parsetransform(eq, &o->transform))
+				o->has_transform = 1;
+			else
+				cfgerror("output %s: bad transform '%s'", o->name, eq);
+		} else if (!strcmp(tok, "enabled")) {
+			o->has_enabled = 1;
+			o->enabled = parsebool(eq);
+		} else if (!strcmp(tok, "mirror")) {
+			o->has_mirror = 1;
+			snprintf(o->mirror, sizeof o->mirror, "%s",
+					strcmp(eq, "none") ? eq : "");
+		} else if (!strcmp(tok, "adaptive_sync")) {
+			o->has_vrr = 1;
+			o->vrr = parsebool(eq);
+		} else {
+			cfgerror("output %s: unknown key '%s'", o->name, tok);
+		}
+	}
+}
+
+/* a mirror shows a real monitor: itself and another mirror are refused */
+void
+cfgoutputcheck(void)
+{
+	size_t i, j;
+
+	for (i = 0; i < noutcfgs; i++) {
+		OutputCfg *o = &outcfgs[i];
+		if (!o->mirror[0] || !strcmp(o->name, "*"))
+			continue;
+		cfg_curline = o->line;
+		if (!strcmp(o->mirror, o->name)) {
+			cfgerror("output %s cannot mirror itself", o->name);
+			o->mirror[0] = '\0';
+			continue;
+		}
+		for (j = 0; j < noutcfgs; j++) {
+			if (j != i && !strcmp(outcfgs[j].name, o->mirror)
+					&& outcfgs[j].mirror[0]) {
+				cfgerror("output %s mirrors %s, which is a mirror itself",
+						o->name, o->mirror);
+				o->mirror[0] = '\0';
+				break;
+			}
+		}
+	}
+}
+
+static void
+outcfgoverlay(const OutputCfg *from, OutputCfg *out)
+{
+	if (from->has_mode) {
+		out->mw = from->mw;
+		out->mh = from->mh;
+		out->mhz = from->mhz;
+	}
+	if (from->has_pos) {
+		out->pos_auto = from->pos_auto;
+		out->x = from->x;
+		out->y = from->y;
+	}
+	if (from->has_scale)
+		out->scale = from->scale;
+	if (from->has_transform)
+		out->transform = from->transform;
+	if (from->has_enabled)
+		out->enabled = from->enabled;
+	if (from->has_mirror)
+		snprintf(out->mirror, sizeof out->mirror, "%s", from->mirror);
+	if (from->has_vrr)
+		out->vrr = from->vrr;
+}
+
+/* the compiled monrules, then "*", then the output's own line */
+void
+outcfgmerged(const char *name, OutputCfg *out)
+{
+	const MonitorRule *r;
+	size_t i;
+
+	memset(out, 0, sizeof(*out));
+	snprintf(out->name, sizeof out->name, "%s", name);
+	out->scale = 1.0f;
+	out->transform = WL_OUTPUT_TRANSFORM_NORMAL;
+	out->enabled = 1;
+	out->pos_auto = 1;
+	for (r = monrules; r < END(monrules); r++) {
+		if (!r->name || strstr(name, r->name)) {
+			out->scale = r->scale;
+			out->transform = r->rr;
+			if (r->x != -1 || r->y != -1) {
+				out->pos_auto = 0;
+				out->x = r->x;
+				out->y = r->y;
+			}
+			break;
+		}
+	}
+	for (i = 0; i < noutcfgs; i++)
+		if (!strcmp(outcfgs[i].name, "*"))
+			outcfgoverlay(&outcfgs[i], out);
+	for (i = 0; i < noutcfgs; i++)
+		if (!strcmp(outcfgs[i].name, name))
+			outcfgoverlay(&outcfgs[i], out);
+	/* "* mirror=X" is how every other screen copies X; X itself stays */
+	if (!strcmp(out->mirror, name))
+		out->mirror[0] = '\0';
+}
+
+/* a source keeps the spot its mirror was fitted to, see mirrorfit() */
+static int
+ismirrorsource(Monitor *m)
+{
+	Monitor *o;
+
+	wl_list_for_each(o, &mons, link)
+		if (o->mirroring && o->mirror_src == m)
+			return 1;
+	return 0;
+}
+
+Monitor *
+monbyname(const char *name)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link)
+		if (!strcmp(m->wlr_output->name, name))
+			return m;
+	return NULL;
+}
+
+/* the monitor this one copies right now: its configured source, if that
+ * one is here, on, and not a mirror itself */
+Monitor *
+mirrorsource(Monitor *m)
+{
+	Monitor *src;
+
+	if (!m->mirror_of[0] || !m->wlr_output->enabled)
+		return NULL;
+	if (!(src = monbyname(m->mirror_of)) || src == m
+			|| !src->wlr_output->enabled || src->mirror_of[0])
+		return NULL;
+	return src;
+}
+
+void
+mirrorstart(Monitor *m)
+{
+	LayerSurface *l, *tmp;
+	size_t i;
+
+	m->mirroring = 1;
+	/* the bar on the source is what the mirror shows; its own would sit
+	 * on top of it */
+	for (i = 0; i < LENGTH(m->layers); i++) {
+		wl_list_for_each_safe(l, tmp, &m->layers[i], link)
+			wlr_layer_surface_v1_destroy(l->layer_surface);
+	}
+	if (grabm == m) {
+		grabm = NULL;
+		if (cursor_mode == CurDriftPan)
+			cursor_mode = CurNormal;
+	}
+	closemon(m);
+}
+
+void
+mirrorstop(Monitor *m)
+{
+	OutputCfg c;
+	Monitor *src = m->mirror_src;
+	struct wlr_output *o = m->wlr_output;
+	struct wlr_output_state st;
+
+	m->mirroring = 0;
+	m->mirror_src = NULL;
+	/* the source was pinned for the mirror; let it float again */
+	if (src && src->wlr_output->enabled && !ismirrorsource(src)) {
+		outcfgmerged(src->wlr_output->name, &c);
+		if (c.pos_auto)
+			wlr_output_layout_add_auto(output_layout, src->wlr_output);
+	}
+	if (!o->enabled)
+		return;
+	outcfgmerged(o->name, &c);
+	if (fabsf(o->scale - c.scale) > 0.001f) {
+		wlr_output_state_init(&st);
+		wlr_output_state_set_scale(&st, c.scale);
+		wlr_output_commit_state(o, &st);
+		wlr_output_state_finish(&st);
+	}
+	if (c.pos_auto)
+		wlr_output_layout_add_auto(output_layout, o);
+	else
+		wlr_output_layout_add(output_layout, o, c.x, c.y);
+}
+
+/* the whole logical area of the source, scaled to fit and centred: the
+ * mirror sits on the same spot of the one scene at its own scale */
+void
+mirrorfit(Monitor *m, Monitor *src)
+{
+	struct wlr_output *o = m->wlr_output;
+	struct wlr_output_layout_output *lo;
+	struct wlr_box sb;
+	struct wlr_output_state st;
+	int pw, ph, lw, lh, x, y;
+	float scale;
+
+	m->mirror_src = src;
+	wlr_output_layout_get_box(output_layout, src->wlr_output, &sb);
+	if (sb.width <= 0 || sb.height <= 0)
+		return;
+	/* an auto-placed source would be pushed right of its own mirror by
+	 * the layout, and the mirror would follow it forever: pin it */
+	lo = wlr_output_layout_get(output_layout, src->wlr_output);
+	if (lo && lo->auto_configured)
+		wlr_output_layout_add(output_layout, src->wlr_output, sb.x, sb.y);
+	wlr_output_transformed_resolution(o, &pw, &ph);
+	scale = MIN((float)pw / (float)sb.width, (float)ph / (float)sb.height);
+	/* the logical size is truncated, keep it from landing one pixel short */
+	scale *= 0.99999f;
+	if (scale <= 0.0f)
+		return;
+	if (fabsf(o->scale - scale) > 0.0001f) {
+		wlr_output_state_init(&st);
+		wlr_output_state_set_scale(&st, scale);
+		if (!wlr_output_commit_state(o, &st))
+			wlr_log(WLR_ERROR, "%s: cannot scale to mirror %s", o->name,
+					src->wlr_output->name);
+		wlr_output_state_finish(&st);
+	}
+	wlr_output_effective_resolution(o, &lw, &lh);
+	x = sb.x - (lw - sb.width) / 2;
+	y = sb.y - (lh - sb.height) / 2;
+	lo = wlr_output_layout_get(output_layout, o);
+	if (!lo || lo->x != x || lo->y != y || lo->auto_configured)
+		wlr_output_layout_add(output_layout, o, x, y);
+}
+
+/* from updatemons: start, stop and place every mirror.  The commits and
+ * layout moves in here re-enter updatemons, so the nested call skips this. */
+void
+placemirrors(void)
+{
+	static int busy;
+	Monitor *m, *src;
+
+	if (busy)
+		return;
+	busy = 1;
+	wl_list_for_each(m, &mons, link) {
+		src = mirrorsource(m);
+		if (src && !m->mirroring)
+			mirrorstart(m);
+		else if (!src && m->mirroring)
+			mirrorstop(m);
+		if (src)
+			mirrorfit(m, src);
+	}
+	busy = 0;
+}
+
+/* bring one output to what the config says, committing only what differs */
+void
+applyoutputcfg(Monitor *m)
+{
+	OutputCfg c;
+	struct wlr_output *o = m->wlr_output;
+	struct wlr_output_state st;
+	struct wlr_output_layout_output *lo;
+	struct wlr_output_mode *mode, *want = NULL;
+
+	outcfgmerged(o->name, &c);
+	snprintf(m->mirror_of, sizeof m->mirror_of, "%s", c.mirror);
+
+	wlr_output_state_init(&st);
+	/* a screen put to sleep by power management is off, not disabled */
+	if (o->enabled != c.enabled && !(m->asleep && c.enabled))
+		wlr_output_state_set_enabled(&st, c.enabled);
+	if (c.enabled) {
+		if (c.mw) {
+			wl_list_for_each(mode, &o->modes, link) {
+				if (mode->width != c.mw || mode->height != c.mh)
+					continue;
+				if (!c.mhz) {
+					if (!want)
+						want = mode;
+				} else if (abs(mode->refresh - c.mhz) <= 500 && (!want
+						|| abs(mode->refresh - c.mhz) < abs(want->refresh - c.mhz))) {
+					want = mode;
+				}
+			}
+			if (want) {
+				if (o->current_mode != want)
+					wlr_output_state_set_mode(&st, want);
+			} else if (o->width != c.mw || o->height != c.mh
+					|| (c.mhz && o->refresh != c.mhz)) {
+				wlr_output_state_set_custom_mode(&st, c.mw, c.mh, c.mhz);
+			}
+		} else if ((want = wlr_output_preferred_mode(o)) && o->current_mode != want) {
+			wlr_output_state_set_mode(&st, want);
+		}
+		if (!m->mirroring && fabsf(o->scale - c.scale) > 0.001f)
+			wlr_output_state_set_scale(&st, c.scale);
+		if (o->transform != c.transform)
+			wlr_output_state_set_transform(&st, c.transform);
+		if (c.vrr != (o->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED))
+			wlr_output_state_set_adaptive_sync_enabled(&st, c.vrr);
+	}
+	if (st.committed) {
+		/* not every output does VRR; keep the rest of the change */
+		if ((st.committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED)
+				&& !wlr_output_test_state(o, &st))
+			st.committed &= ~WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED;
+		if (!wlr_output_commit_state(o, &st))
+			wlr_log(WLR_ERROR, "%s: output configuration rejected", o->name);
+		else if (c.enabled)
+			m->asleep = 0;
+	}
+	wlr_output_state_finish(&st);
+
+	if (!o->enabled || mirrorsource(m))
+		return;
+	lo = wlr_output_layout_get(output_layout, o);
+	if (c.pos_auto) {
+		if (!lo || (!lo->auto_configured && !ismirrorsource(m)))
+			wlr_output_layout_add_auto(output_layout, o);
+	} else if (!lo || lo->x != c.x || lo->y != c.y || lo->auto_configured) {
+		wlr_output_layout_add(output_layout, o, c.x, c.y);
+	}
+}
+
+void
+applyoutputcfgs(void)
+{
+	Monitor *m;
+
+	wl_list_for_each(m, &mons, link)
+		applyoutputcfg(m);
+	updatemons(NULL, NULL);
+}
+
+static void
+fputfield(FILE *f, const char *s)
+{
+	if (!s || !*s) {
+		fputs("none", f);
+		return;
+	}
+	for (; *s; s++)
+		fputc(*s == '\t' || *s == '\n' || *s == '\r' ? ' ' : *s, f);
+}
+
+/* every output, on or off, one tab-separated line each: what the monitor
+ * settings page reads and what a script can parse with cut -f */
+void
+saveoutputstate(void)
+{
+	char path[600], dir[512];
+	Monitor *m;
+	struct wlr_output_mode *mode, *pref;
+	FILE *f;
+
+	if (!layoutstatepath(dir, sizeof dir))
+		return;
+	{
+		char *slash = strrchr(dir, '/');
+		if (slash) {
+			*slash = '\0';
+			mkdir(dir, 0700);
+			*slash = '/';
+		}
+	}
+	mkdir(dir, 0700);
+	snprintf(path, sizeof path, "%s/outputs", dir);
+	if (!(f = fopen(path, "w")))
+		return;
+	wl_list_for_each(m, &mons, link) {
+		struct wlr_output *o = m->wlr_output;
+		struct wlr_box b = {0};
+		int first = 1;
+
+		if (o->enabled)
+			wlr_output_layout_get_box(output_layout, o, &b);
+		pref = wlr_output_preferred_mode(o);
+		fprintf(f, "name=%s\tenabled=%d\tx=%d\ty=%d\tw=%d\th=%d\tpw=%d\tph=%d"
+				"\thz=%.2f\tscale=%.2f\ttransform=%s\tmirror=%s\tfocused=%d\tmake=",
+				o->name, o->enabled ? 1 : 0, b.x, b.y, b.width, b.height,
+				o->width, o->height, o->refresh / 1000.0, o->scale,
+				transformname(o->transform),
+				m->mirroring && m->mirror_src ? m->mirror_src->wlr_output->name : "none",
+				m == selmon);
+		fputfield(f, o->make);
+		fputs("\tmodel=", f);
+		fputfield(f, o->model);
+		fputs("\tserial=", f);
+		fputfield(f, o->serial);
+		if (pref)
+			fprintf(f, "\tpreferred=%dx%d@%.2f", pref->width, pref->height,
+					pref->refresh / 1000.0);
+		else
+			fputs("\tpreferred=none", f);
+		fputs("\tmodes=", f);
+		wl_list_for_each(mode, &o->modes, link) {
+			fprintf(f, "%s%dx%d@%.2f", first ? "" : ",", mode->width,
+					mode->height, mode->refresh / 1000.0);
+			first = 0;
+		}
+		fputc('\n', f);
+	}
+	fclose(f);
+}
+
 void
 createmon(struct wl_listener *listener, void *data)
 {
 	/* This event is raised by the backend when a new output (aka a display or
 	 * monitor) becomes available. */
 	struct wlr_output *wlr_output = data;
-	const MonitorRule *r;
 	size_t i;
-	struct wlr_output_state state;
 	Monitor *m;
 
 	if (!wlr_output_init_render(wlr_output, alloc, drw))
@@ -3862,34 +4431,12 @@ createmon(struct wl_listener *listener, void *data)
 	m->lt = default_layout >= 0 && default_layout < LtLast
 			? (unsigned int)default_layout : LtBSP;
 
-	wlr_output_state_init(&state);
-	/* Initialize monitor state using configured rules */
-	for (r = monrules; r < END(monrules); r++) {
-		if (!r->name || strstr(wlr_output->name, r->name)) {
-			m->m.x = r->x;
-			m->m.y = r->y;
-			wlr_output_state_set_scale(&state, r->scale);
-			wlr_output_state_set_transform(&state, r->rr);
-			break;
-		}
-	}
-
-	/* The mode is a tuple of (width, height, refresh rate), and each
-	 * monitor supports only a specific set of modes. We just pick the
-	 * monitor's preferred mode; a more sophisticated compositor would let
-	 * the user configure it. */
-	wlr_output_state_set_mode(&state, wlr_output_preferred_mode(wlr_output));
-
 	m->unblock = wl_event_loop_add_timer(event_loop, monunblock, m);
 
 	/* Set up event listeners */
 	LISTEN(&wlr_output->events.frame, &m->frame, rendermon);
 	LISTEN(&wlr_output->events.destroy, &m->destroy, cleanupmon);
 	LISTEN(&wlr_output->events.request_state, &m->request_state, requestmonstate);
-
-	wlr_output_state_set_enabled(&state, 1);
-	wlr_output_commit_state(wlr_output, &state);
-	wlr_output_state_finish(&state);
 
 	wl_list_insert(&mons, &m->link);
 
@@ -3912,10 +4459,12 @@ createmon(struct wl_listener *listener, void *data)
 	 * output (such as DPI, scale factor, manufacturer, etc).
 	 */
 	m->scene_output = wlr_scene_output_create(scene, wlr_output);
-	if (m->m.x == -1 && m->m.y == -1)
-		wlr_output_layout_add_auto(output_layout, wlr_output);
-	else
-		wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
+	/* the config decides mode, scale, transform, position and whether it
+	 * comes up at all.  Joining the layout runs updatemons(); a mirror or
+	 * a disabled output does not join it, so run it for them here. */
+	applyoutputcfg(m);
+	if (!wlr_output_layout_get(output_layout, wlr_output))
+		updatemons(NULL, NULL);
 }
 
 void
@@ -4713,7 +5262,7 @@ saveworkspacestate(void)
 	wl_list_for_each(m, &mons, link) {
 		uint32_t wscnt[NUMWS] = {0};
 		int i;
-		if (!m->wlr_output->enabled)
+		if (!m->wlr_output->enabled || m->mirroring)
 			continue;
 		wl_list_for_each(c, &clients, link) {
 			if (c->mon == m && c->ws < NUMWS && !client_is_unmanaged(c))
@@ -5127,7 +5676,8 @@ overviewpanel(Monitor *m, unsigned int ws, const struct wlr_box *box, float opac
 static int
 overviewvalid(Monitor *m)
 {
-	return m && m->wlr_output->enabled && m->m.width > 0 && m->m.height > 0
+	return m && m->wlr_output->enabled && !m->mirroring
+			&& m->m.width > 0 && m->m.height > 0
 			&& m->w.width > 0 && m->w.height > 0;
 }
 
@@ -6603,6 +7153,15 @@ rendermon(struct wl_listener *listener, void *data)
 	int animpending = 0, pointerrefresh = 0, skipframe = 0, relayout = 0;
 	int blockwait = 0;
 
+	/* a mirror repaints the scene where its source is; the source's frame
+	 * drives every animation */
+	if (m->mirroring) {
+		wlr_scene_output_commit(m->scene_output, NULL);
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		wlr_scene_output_send_frame_done(m->scene_output, &now);
+		return;
+	}
+
 	/* Render if no XDG clients have an outstanding resize and are visible on
 	 * this monitor.  A client that never acks must not hold the output
 	 * hostage: past RESIZEWAIT it is drawn at whatever size it has, or the
@@ -7034,6 +7593,9 @@ setmon(Client *c, Monitor *m, int ws)
 {
 	Monitor *oldmon = c->mon;
 
+	/* nothing lives on a mirror */
+	if (m && m->mirroring)
+		m = m->mirror_src ? m->mirror_src : selmon;
 	if (oldmon == m)
 		return;
 	if (oldmon) {
@@ -7562,6 +8124,9 @@ readconfig(void)
 	cfg_curline = 0;
 	cfg_errline = 0;
 	cfg_errmsg[0] = '\0';
+	free(outcfgs);
+	outcfgs = NULL;
+	noutcfgs = 0;
 
 	if ((env = getenv("XDG_CONFIG_HOME")))
 		snprintf(path, sizeof path, "%s/gluewc/config.conf", env);
@@ -7695,12 +8260,15 @@ readconfig(void)
 			if (!(autostarts = realloc(autostarts, (nautostarts + 1) * sizeof(char *))))
 				die("config: realloc:");
 			autostarts[nautostarts++] = strdup(v);
+		} else if (!strcmp(k, "output")) {
+			cfgoutput(v);
 		} else {
 			cfgerror("unknown key '%s'", k);
 		}
 	}
 	free(line);
 	fclose(f);
+	cfgoutputcheck();
 	/* the layout the last session ended in wins over the configured one */
 	loadlayoutstate();
 }
@@ -8009,6 +8577,7 @@ reloadconfig(const Arg *arg)
 	cfgerrorshow();
 	wl_list_for_each(m, &mons, link)
 		animstop(m);
+	applyoutputcfgs();
 
 	wlr_scene_set_blur_data(scene, blur_passes, blur_radius, 0.02f, 0.9f, 0.9f, 1.1f);
 	wlr_scene_rect_set_color(root_bg, rootcolor);
@@ -8505,6 +9074,8 @@ updatemons(struct wl_listener *listener, void *data)
 	struct wlr_output_configuration_head_v1 *config_head;
 	Monitor *m;
 
+	placemirrors();
+
 	/* First remove from the layout the disabled monitors */
 	wl_list_for_each(m, &mons, link) {
 		if (m->wlr_output->enabled || m->asleep)
@@ -8518,7 +9089,7 @@ updatemons(struct wl_listener *listener, void *data)
 	}
 	/* Insert outputs that need to */
 	wl_list_for_each(m, &mons, link) {
-		if (m->wlr_output->enabled
+		if (m->wlr_output->enabled && !m->mirroring
 				&& !wlr_output_layout_get(output_layout, m->wlr_output))
 			wlr_output_layout_add_auto(output_layout, m->wlr_output);
 	}
@@ -8552,13 +9123,16 @@ updatemons(struct wl_listener *listener, void *data)
 			wlr_session_lock_surface_v1_configure(m->lock_surface, m->m.width, m->m.height);
 		}
 
-		/* Calculate the effective monitor geometry to use for clients */
-		arrangelayers(m);
-		/* Don't move clients to the left output when plugging monitors */
-		arrange(m);
-		/* make sure fullscreen clients have the right size */
-		if ((c = focustop(m)) && c->isfullscreen)
-			resize(c, m->m, 0);
+		/* a mirror has nothing of its own to lay out */
+		if (!m->mirroring) {
+			/* Calculate the effective monitor geometry to use for clients */
+			arrangelayers(m);
+			/* Don't move clients to the left output when plugging monitors */
+			arrange(m);
+			/* make sure fullscreen clients have the right size */
+			if ((c = focustop(m)) && c->isfullscreen)
+				resize(c, m->m, 0);
+		}
 
 		/* Try to re-set the gamma LUT when updating monitors,
 		 * it's only really needed when enabling a disabled output, but meh. */
@@ -8567,7 +9141,7 @@ updatemons(struct wl_listener *listener, void *data)
 		config_head->state.x = m->m.x;
 		config_head->state.y = m->m.y;
 
-		if (!selmon) {
+		if (!selmon && !m->mirroring) {
 			selmon = m;
 		}
 	}
@@ -8596,6 +9170,7 @@ updatemons(struct wl_listener *listener, void *data)
 	wlr_output_manager_v1_set_configuration(output_mgr, config);
 	if (overview_visible)
 		overviewrelayout();
+	saveoutputstate();
 }
 
 void
@@ -8637,7 +9212,9 @@ Monitor *
 xytomon(double x, double y)
 {
 	struct wlr_output *o = wlr_output_layout_output_at(output_layout, x, y);
-	return o ? o->data : NULL;
+	Monitor *m = o ? o->data : NULL;
+	/* a mirror sits on the same spot as its source: the source owns it */
+	return m && m->mirroring && m->mirror_src ? m->mirror_src : m;
 }
 
 void

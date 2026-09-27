@@ -41,6 +41,29 @@ The installed session creates this file from
 .Pa /usr/local/share/gluewc/config.def.conf
 on first login.
 .Pp
+Monitors are set up in the same file, one
+.Ql output = NAME key=value ...
+line each, with
+.Ql *
+for every output without a line of its own, and applied again whenever the
+file is saved.
+The keys are
+.Ql mode=WxH[@Hz] ,
+.Ql pos=X,Y | auto ,
+.Ql scale=F ,
+.Ql transform=normal|90|180|270|flipped|flipped-90|flipped-180|flipped-270 ,
+.Ql enabled=true|false ,
+.Ql mirror=NAME | none
+and
+.Ql adaptive_sync=true|false .
+A mirror shows the whole screen of another monitor scaled to fit;
+.Ql output = * mirror=eDP-1
+shows the laptop screen everywhere.
+The current state of every output is kept in
+.Pa $XDG_STATE_HOME/gluewc/outputs
+and printed by
+.Ql gluewc-msg outputs .
+.Pp
 Appearance, XKB settings, autostart commands and bindings can be changed at
 runtime.
 Press Mod-Shift-R to reload the file in place.
@@ -183,6 +206,9 @@ Keyboard and cursor configuration used by the underlying libraries.
 .Bl -tag -width Ds
 .It Pa ~/.config/gluewc/config.conf
 Runtime configuration.
+.It Pa ~/.local/state/gluewc/outputs
+One tab-separated line per monitor: geometry, mode, scale, transform, mirror
+source and the available modes; rewritten on every layout change.
 .It Pa ~/.local/state/gluewc.log
 Current session log when started with gluewc-session.
 .It Pa ~/.local/state/gluewc.log.old

@@ -53,6 +53,8 @@ GitHub hands mp4 files over as downloads instead of playing them in the page.
 - Insert and normal keyboard modes inspired by modal window managers
 - Runtime config and keybind reload without recompiling, applied as soon as the
   file is saved and reported on screen when a line does not parse
+- Monitors set up from the same file and applied live: mode, position, scale,
+  rotation, on/off, and mirroring one screen onto another or onto all of them
 - Rounded corners, blur and optional transparency through SceneFX
 - XWayland, layer-shell, session lock and output power-management support
 - dwl IPC and foreign-toplevel support for bars and desktop shells
@@ -254,6 +256,7 @@ speaks the same protocol from the command line:
 
 ```sh
 gluewc-msg status                        # one line per output
+gluewc-msg outputs                       # geometry, modes, mirror of each monitor
 gluewc-msg -o eDP-1 workspace 3          # view workspace 3 there
 gluewc-msg move 2                        # send the focused window to 2
 gluewc-msg layout scroll

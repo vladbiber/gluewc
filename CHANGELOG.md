@@ -4,6 +4,15 @@
 
 ### Added
 
+- Monitors are configured from the config file and applied live: `output =
+  NAME mode=... pos=... scale=... transform=... enabled=... mirror=...`, with
+  `*` for every output without a line of its own. Mirroring shows a monitor's
+  whole screen on another one, scaled to fit with black bars, without a
+  second scene: the mirror sits on the same spot of the layout at its own
+  scale, has no workspaces or windows, and closes its own bar while it copies.
+  `output = * mirror=eDP-1` is the one-line "same picture everywhere". The
+  current state of every output, modes included, is written to
+  `$XDG_STATE_HOME/gluewc/outputs` and printed by `gluewc-msg outputs`
 - `gluewc-backlight up|down`, now behind the brightness keys: 5% steps down to
   10%, then 1% steps to 0, so the backlight can go all the way off and does
   not jump in the dark. It wraps `brightnessctl` or `light` and keeps stepping

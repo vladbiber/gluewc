@@ -7,6 +7,7 @@
  *   gluewc-msg [-o OUTPUT] move N          send the focused window to N
  *   gluewc-msg [-o OUTPUT] layout NAME     bsp, scroll or drift
  *   gluewc-msg status                      one line per output, then exit
+ *   gluewc-msg outputs                     the monitor state file, verbatim
  *   gluewc-msg quit                        end the session
  *
  * Without -o the command goes to the first output the compositor lists.
@@ -125,7 +126,7 @@ static void
 usage(void)
 {
 	fputs("usage: gluewc-msg [-o OUTPUT] workspace N | move N | layout NAME\n"
-			"       gluewc-msg status | quit\n", stderr);
+			"       gluewc-msg status | outputs | quit\n", stderr);
 	exit(2);
 }
 
@@ -146,6 +147,28 @@ main(int argc, char *argv[])
 	if (argc < 2)
 		usage();
 	cmd = argv[1];
+	if (!strcmp(cmd, "outputs")) {
+		/* what gluewc writes on every layout change: name, geometry,
+		 * mode, scale, transform, mirror source and the mode list */
+		char path[600], buf[4096];
+		const char *env;
+		FILE *f;
+		size_t len;
+		if ((env = getenv("XDG_STATE_HOME")) && *env)
+			snprintf(path, sizeof path, "%s/gluewc/outputs", env);
+		else if ((env = getenv("HOME")) && *env)
+			snprintf(path, sizeof path, "%s/.local/state/gluewc/outputs", env);
+		else
+			return 1;
+		if (!(f = fopen(path, "r"))) {
+			perror(path);
+			return 1;
+		}
+		while ((len = fread(buf, 1, sizeof buf, f)) > 0)
+			fwrite(buf, 1, len, stdout);
+		fclose(f);
+		return 0;
+	}
 
 	if (!(dpy = wl_display_connect(NULL))) {
 		fputs("gluewc-msg: no wayland display\n", stderr);

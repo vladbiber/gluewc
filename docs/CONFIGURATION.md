@@ -273,6 +273,72 @@ software boost above it.
 
 Touchpad gesture availability depends on libinput and the hardware.
 
+## Monitors
+
+Every output can be set up from the config file, and a saved change is applied
+on the spot like everything else. One line per monitor:
+
+```ini
+output = eDP-1 scale=1.5 pos=0,0
+output = DP-1 mode=2560x1440@144 pos=1280,0
+output = HDMI-A-1 mirror=eDP-1
+output = DP-2 enabled=false
+```
+
+The name is the one the monitor has on the wire (`eDP-1`, `DP-1`, `HDMI-A-1`);
+`gluewc-msg outputs` lists them. `*` stands for every output that has no line
+of its own, and a later line for the same name overrides the earlier one key
+by key.
+
+| Key | Values | Default |
+| --- | --- | --- |
+| `mode` | `WxH`, `WxH@Hz`, `preferred` | the monitor's preferred mode |
+| `pos` | `X,Y` or `auto` | `auto`: to the right of the others |
+| `scale` | `0.1` to `10`, fractions allowed | `1` |
+| `transform` | `normal`, `90`, `180`, `270`, `flipped`, `flipped-90`, `flipped-180`, `flipped-270` | `normal` |
+| `enabled` | `true`, `false` | `true` |
+| `mirror` | another output's name, or `none` | `none` |
+| `adaptive_sync` | `true`, `false` | `false` |
+
+A `mode` no fixed mode matches is tried as a custom mode; a monitor that
+cannot do it keeps its current one and the log says so. A key that is missing
+from the line means the default, so removing `scale=2` puts the scale back to 1
+on the next save. Changes made from outside with `wlr-randr` or `kanshi` work
+as before and are not written back, which means the next save of the config
+resets them to what the file says.
+
+### Mirroring
+
+`output = HDMI-A-1 mirror=eDP-1` makes the second monitor show everything on
+the first: the whole logical area, scaled to fit and centred, with black bars
+where the shapes differ. `output = * mirror=eDP-1` does it for every other
+monitor at once, which is the "same picture everywhere" setting; the source
+itself is exempt. A mirror is not a place of its own: it has no workspaces,
+never holds a window or the focus, its bar and wallpaper are closed while it
+mirrors (the source's are what it shows), and the cursor is visible on both.
+When the source is unplugged or turned off the mirror becomes a normal monitor
+again, and comes back to mirroring when the source returns. A mirror cannot be
+a source, and a monitor cannot mirror itself; both are reported as config
+errors. With `pos=auto` the monitors may shift while a mirror engages; give the
+source a fixed `pos` if the numbers matter.
+
+### The outputs state file
+
+Whenever the layout changes gluewc rewrites `$XDG_STATE_HOME/gluewc/outputs`
+(`~/.local/state/gluewc/outputs`), one tab-separated line per output, on or
+off:
+
+```text
+name=DP-1	enabled=1	x=0	y=0	w=1920	h=1080	pw=1920	ph=1080	hz=60.00	scale=1.00	transform=normal	mirror=none	focused=1	make=Dell Inc.	model=U2720Q	serial=none	preferred=3840x2160@60.00	modes=3840x2160@60.00,1920x1080@60.00
+```
+
+`w`/`h` are the logical size after scale and transform, `pw`/`ph` the pixels of
+the current mode, `modes` every fixed mode the monitor offers, `mirror` the
+source it is copying right now. `gluewc-msg outputs` prints the file. The
+glueqs settings panel has a Monitors page built on it: it draws the layout,
+lets you drag screens around, pick modes and scales, mirror one or all, and
+writes the `output` lines above.
+
 ## Bars and shells
 
 Layer-shell panels reserve their exclusive area automatically, including during
