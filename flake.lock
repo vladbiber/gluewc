@@ -3,11 +3,11 @@
     "glueqs": {
       "flake": false,
       "locked": {
-        "lastModified": 1788708441,
-        "narHash": "sha256-U46u92oUPIGIMlg9ELznePy48j8z69XMBb07G74c6wQ=",
+        "lastModified": 1790520757,
+        "narHash": "sha256-lOGKafxdTFY54ZQRcxCryDyQtdqyk/ZE4fg+Ph5pMLE=",
         "owner": "vladbiber",
         "repo": "glueqs",
-        "rev": "1c787c3fa8ade2d7fe1148c5f76facdb8313053e",
+        "rev": "4a70e24e3314c1e9d7d4965daaa8b3125aeebba3",
         "type": "github"
       },
       "original": {
