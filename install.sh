@@ -326,7 +326,7 @@ fi
 if [ "$UNINSTALL" -eq 1 ]; then
 	log "Removing gluewc"
 	run_install rm -f "$DESTDIR$PREFIX/bin/gluewc" "$DESTDIR$PREFIX/bin/gluewc-session" \
-		"$DESTDIR$PREFIX/bin/gluewc-msg" \
+		"$DESTDIR$PREFIX/bin/gluewc-msg" "$DESTDIR$PREFIX/bin/gluewc-backlight" \
 		"$DESTDIR$PREFIX/share/man/man1/gluewc.1" \
 		"$DESTDIR$PREFIX/share/gluewc/config.def.conf" \
 		"$DESTDIR$SESSIONDIR/gluewc.desktop"

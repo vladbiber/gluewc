@@ -133,19 +133,18 @@ static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TA
 /* helper for spawning shell commands in the pre dwm-5.0 fashion */
 #define SHCMD(cmd) { .v = (const char*[]){ "/bin/sh", "-c", cmd, NULL } }
 
-/* Volume and backlight are driven by whichever helper is installed: wpctl
- * comes with WirePlumber and is there on any PipeWire system, pactl with the
- * PulseAudio tools, and the backlight is either brightnessctl or light. */
+/* Volume is driven by whichever helper is installed: wpctl comes with
+ * WirePlumber and is there on any PipeWire system, pactl with the PulseAudio
+ * tools. The backlight goes through gluewc-backlight, which wraps
+ * brightnessctl or light and steps 5% down to 10%, then 1% down to 0. */
 #define VOLCMD(wp, pa) SHCMD("if command -v wpctl >/dev/null 2>&1; then " \
 	"wpctl " wp "; else pactl " pa "; fi")
-#define BRTCMD(bc, li) SHCMD("if command -v brightnessctl >/dev/null 2>&1; then " \
-	"brightnessctl " bc "; else light " li "; fi")
 #define VOLUP   VOLCMD("set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+", "set-sink-volume @DEFAULT_SINK@ +5%")
 #define VOLDOWN VOLCMD("set-volume @DEFAULT_AUDIO_SINK@ 5%-", "set-sink-volume @DEFAULT_SINK@ -5%")
 #define VOLMUTE VOLCMD("set-mute @DEFAULT_AUDIO_SINK@ toggle", "set-sink-mute @DEFAULT_SINK@ toggle")
 #define MICMUTE VOLCMD("set-mute @DEFAULT_AUDIO_SOURCE@ toggle", "set-source-mute @DEFAULT_SOURCE@ toggle")
-#define BRTUP   BRTCMD("set +10%", "-A 10")
-#define BRTDOWN BRTCMD("set 10%-", "-U 10")
+#define BRTUP   SHCMD("gluewc-backlight up")
+#define BRTDOWN SHCMD("gluewc-backlight down")
 
 /* Screenshots. grim takes the picture, slurp draws the crop rectangle and
  * wl-copy puts it on the clipboard. slurp exits non-zero when the selection

@@ -215,8 +215,10 @@ doing the same thing, and in normal mode the same keys need no `Super`.
 
 Playback needs `playerctl`. Volume goes through `wpctl` (part of WirePlumber,
 so it is there on any PipeWire system) and falls back to `pactl`; the backlight
-uses `brightnessctl` and falls back to `light`. Every one of these is a plain
-`spawn:` line in the config, so they can be pointed at anything else.
+goes through `gluewc-backlight`, which drives `brightnessctl` (or `light`) in
+5% steps down to 10% and 1% steps below that, so it reaches 0 and turns the
+panel off. Every one of these is a plain `spawn:` line in the config, so they
+can be pointed at anything else.
 
 In the overview, use arrows, workspace numbers, the mouse wheel or a two-finger
 horizontal swipe to navigate. Click a window to focus it, or drag it onto the

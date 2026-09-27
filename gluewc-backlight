@@ -1,0 +1,43 @@
+#!/bin/sh
+# gluewc-backlight: step the backlight up or down on a ladder that is fine at
+# the bottom and coarse above it: 0 1 2 ... 10 15 20 ... 100. A plain 5% step
+# can never reach 0 and jumps too far when the room is dark. Uses brightnessctl
+# when it is installed and light otherwise; 0 really turns the panel off.
+
+usage() { printf 'usage: gluewc-backlight up|down\n' >&2; exit 2; }
+[ $# -eq 1 ] || usage
+case $1 in up|down) ;; *) usage ;; esac
+
+if command -v brightnessctl >/dev/null 2>&1; then
+	get() { brightnessctl -m | awk -F, 'NR==1 { printf "%d %d\n", $3, $5 }'; }
+	put() { brightnessctl -q -n0 set "$1%"; }
+elif command -v light >/dev/null 2>&1; then
+	get() { light -G | awk '{ printf "%d 100\n", $1 + 0.5 }'; }
+	put() { light -S "$1"; }
+else
+	printf 'gluewc-backlight: neither brightnessctl nor light is installed\n' >&2
+	exit 1
+fi
+
+set -- "$1" $(get)
+cur=$2; max=$3
+[ "$max" -gt 0 ] 2>/dev/null || exit 1
+pct=$(( (cur * 100 + max / 2) / max ))
+
+if [ "$1" = down ]; then
+	if [ "$pct" -le 10 ]; then t=$((pct - 1)); else t=$(( (pct - 1) / 5 * 5 )); fi
+else
+	if [ "$pct" -lt 10 ]; then t=$((pct + 1)); else t=$(( (pct / 5 + 1) * 5 )); fi
+fi
+[ "$t" -lt 0 ] && t=0
+[ "$t" -gt 100 ] && t=100
+
+# Panels with only a handful of levels can round a 1% step back onto the
+# level they are on; keep stepping until the hardware value actually moves.
+while :; do
+	put "$t"
+	set -- "$1" $(get)
+	[ "$2" -ne "$cur" ] && break
+	[ "$t" -le 0 ] || [ "$t" -ge 100 ] && break
+	if [ "$1" = down ]; then t=$((t - 1)); else t=$((t + 1)); fi
+done

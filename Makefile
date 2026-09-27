@@ -22,7 +22,7 @@ MSGLIBS   = `$(PKG_CONFIG) --libs wayland-client` $(LIBS)
 all: gluewc gluewc-msg
 
 check: gluewc
-	sh -n install.sh gluewc-session tests/drm-test.sh
+	sh -n install.sh gluewc-session gluewc-backlight tests/drm-test.sh
 	$(MAKE) -C tests
 gluewc: gluewc.o util.o dwl-ipc-unstable-v2-protocol.o
 	$(CC) gluewc.o util.o dwl-ipc-unstable-v2-protocol.o $(GLUEWCCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
@@ -78,7 +78,7 @@ dist: clean
 	cp -R .github docs LICENSE* Makefile CHANGELOG.md CONTRIBUTING.md \
 		README.md SECURITY.md install.sh flake.nix client.h config.def.h \
 		config.def.conf config.mk protocols gluewc.1 gluewc.c gluewc-msg.c \
-		util.c util.h gluewc.desktop gluewc-session gluewc-$(VERSION)
+		util.c util.h gluewc.desktop gluewc-session gluewc-backlight gluewc-$(VERSION)
 	tar -caf gluewc-$(VERSION).tar.gz gluewc-$(VERSION)
 	rm -rf gluewc-$(VERSION)
 
@@ -91,6 +91,8 @@ install: gluewc gluewc-msg
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/gluewc-msg
 	cp -f gluewc-session $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/gluewc-session
+	cp -f gluewc-backlight $(DESTDIR)$(PREFIX)/bin
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/gluewc-backlight
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
 	cp -f gluewc.1 $(DESTDIR)$(MANDIR)/man1
 	chmod 644 $(DESTDIR)$(MANDIR)/man1/gluewc.1

@@ -4,6 +4,10 @@
 
 ### Added
 
+- `gluewc-backlight up|down`, now behind the brightness keys: 5% steps down to
+  10%, then 1% steps to 0, so the backlight can go all the way off and does
+  not jump in the dark. It wraps `brightnessctl` or `light` and keeps stepping
+  on panels whose levels are coarser than 1%
 - Nothing crosses a monitor edge any more. Every window is cut at the edge of
   its own monitor — a scroll-layout column hanging off the right, a window
   sliding a full screen away during a workspace switch, a retile crossing the

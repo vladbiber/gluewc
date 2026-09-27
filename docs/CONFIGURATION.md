@@ -191,9 +191,13 @@ working as they always did, and normal mode has the same keys without `Super`.
 | `Super+F7`, `Super+F8` | backlight down, up |
 
 The commands pick the helper that is installed rather than insisting on one:
-`wpctl` (WirePlumber, present on any PipeWire system) before `pactl`, and
-`brightnessctl` before `light`. Playback uses `playerctl`. They are ordinary
-`spawn:` binds, so replacing one is a single line:
+`wpctl` (WirePlumber, present on any PipeWire system) before `pactl`. The
+backlight keys run `gluewc-backlight up|down`, a small script installed next
+to the compositor that wraps `brightnessctl` (or `light`) and walks the ladder
+0, 1, 2 ... 10, 15, 20 ... 100: 5% steps where the difference is barely
+visible, 1% steps in the dark, and 0 turns the panel off. Playback uses
+`playerctl`. They are ordinary `spawn:` binds, so replacing one is a single
+line:
 
 ```ini
 bind_insert = mod+F6 = spawn:pamixer -i 5
