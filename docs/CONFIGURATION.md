@@ -144,6 +144,7 @@ Actions:
 | Action | Result |
 | --- | --- |
 | `spawn:COMMAND` | run a shell command |
+| `macro:stop_all` | stop every macro and release synthetic keys/buttons |
 | `wm:quit` | quit gluewc |
 | `wm:reload` | reload the runtime config |
 | `wm:overview` | toggle overview |
@@ -174,6 +175,36 @@ Actions:
 | `wm:move_to_workspace:N` | move without following |
 | `wm:move_to_workspace_follow:N` | move and follow |
 | `wm:move_to_workspace_prev/next` | move to an adjacent workspace |
+
+## Macros
+
+Macros are scheduled inside the compositor. They create no helper process and
+have no active timer while stopped. A definition contains its own global
+trigger:
+
+```ini
+# Left click 20 times per second while Shift+R is held.
+macro = rapid_click trigger=shift+r type=click mode=hold button=left cps=20 press=10
+
+# Type Q, P, O and Space repeatedly; the second press of Super+F9 stops it.
+macro = qpo trigger=mod+F9 type=sequence mode=toggle interval=80 press=10 sequence=q,p,o,space
+
+# Explicit waits and pointer clicks can be mixed into a sequence.
+macro = mixed trigger=mod+F10 type=sequence mode=once interval=0 press=10 sequence=q,wait:120,click:left,wait:80,Return
+
+# Optional emergency shortcut.
+bind_insert = mod+shift+Escape = macro:stop_all
+```
+
+`type` is `click` or `sequence`. `mode` is `hold`, `toggle` or `once`.
+Click macros accept `button=left|right|middle` and `cps=1..200`. Sequence
+items are XKB key combinations, `wait:MILLISECONDS`, or
+`click:left|right|middle`; `interval` is the extra gap after each key or click.
+`press` controls how long a generated key or button stays down. Macro triggers
+take priority over ordinary compositor binds using the same combination.
+
+All macros stop when the session locks or the configuration reloads. gluewc
+also releases any generated key or mouse button that was down at that moment.
 
 ## Media, volume and backlight
 

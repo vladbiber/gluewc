@@ -45,6 +45,7 @@ static float drift_zoom_min                = 0.2f;  /* how far the camera can zo
 static float drift_zoom_max                = 3.0f;  /* how far the camera can zoom in */
 static float drift_zoom_step               = 1.12f; /* zoom factor per key press or wheel notch */
 static float drift_pan_speed               = 1.0f;  /* multiplier for touchpad and scroll panning */
+static int swipe_distance                  = 300;   /* touchpad travel for a whole workspace, 0 = step at once */
 /* This conforms to the xdg-protocol. Set the alpha to zero to restore the old behavior */
 static const float fullscreen_bg[]         = {0.0f, 0.0f, 0.0f, 1.0f}; /* You can also use glsl colors */
 

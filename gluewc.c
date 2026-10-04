@@ -198,6 +198,7 @@ struct Client {
 		int zoom;    /* the open animation also scales the window up */
 		float scale; /* scale currently painted on the tree, 1 = untouched */
 		float t; /* progress 0..1, advanced only on rendered frames */
+		int swipe; /* ms: finishing a touchpad swipe, eased out from its speed */
 		struct wlr_box from, to; /* only x/y are used */
 	} anim;
 	uint32_t resize; /* configure serial of a pending resize */
@@ -219,6 +220,33 @@ typedef struct {
 	void (*func)(const Arg *);
 	Arg arg;
 } Bind;
+
+enum { MacroSequence, MacroClick };
+enum { MacroOnce, MacroHold, MacroToggle };
+enum { MacroStepKey = 1, MacroStepWait, MacroStepClick };
+
+typedef struct {
+	int type;
+	uint32_t mods;
+	xkb_keysym_t keysym;
+	uint32_t button;
+	int delay;
+} MacroStep;
+
+typedef struct {
+	char name[64];
+	uint32_t trigger_mods;
+	xkb_keysym_t trigger_sym;
+	int type, mode, interval, press_ms, cps;
+	uint32_t button;
+	MacroStep *steps;
+	size_t nsteps, pos;
+	struct wl_event_source *timer;
+	int running, trigger_down;
+	uint32_t trigger_keycode;
+	int down_type;
+	uint32_t down_code, down_mods;
+} Macro;
 
 typedef struct {
 	struct wlr_keyboard_group *wlr_group;
@@ -495,6 +523,9 @@ static int keyrepeat(void *data);
 static void killclient(const Arg *arg);
 static int layeranimadvance(Monitor *m, float dt);
 static void locksession(struct wl_listener *listener, void *data);
+static int macrohandle(uint32_t mods, xkb_keysym_t sym, uint32_t keycode,
+		enum wl_keyboard_key_state state);
+static void macrostopall(void);
 static void mapnotify(struct wl_listener *listener, void *data);
 static void maximizenotify(struct wl_listener *listener, void *data);
 static void motionabsolute(struct wl_listener *listener, void *data);
@@ -580,6 +611,7 @@ static void scroll_maximize(Client *sel);
 static Client *scroll_next(Monitor *m, Client *sel);
 static void scroll_swap(Client *sel, int dir);
 static void scroll_tile(Monitor *m);
+static int wsdragshows(Client *c);
 static void swipefocus(int dir);
 static void overviewfocuscol(int dir);
 static void setcursor(struct wl_listener *listener, void *data);
@@ -640,6 +672,8 @@ static char **autostarts;
 static size_t nautostarts;
 static OutputCfg *outcfgs;
 static size_t noutcfgs;
+static Macro *macros;
+static size_t nmacros;
 static char xkb_layout_buf[64], xkb_variant_buf[64], xkb_options_buf[128];
 
 /* status bar IPC (dwl-ipc-unstable-v2, same protocol mmsg/waybar speak) */
@@ -674,6 +708,16 @@ static char cfg_path[512];
 static int overview_button_swallow;
 static double overview_swipe_dx, overview_swipe_dy;
 static int overview_swipe_active, overview_swipe_triggered;
+/* a workspace switch that follows the fingers */
+static struct {
+	Monitor *m;
+	int active, vertical, dir, refused;
+	unsigned int nb;
+	double pos; /* finger travel along the axis */
+	double vel; /* finger speed, units per ms, smoothed */
+	uint32_t last;
+} wsdrag;
+static uint32_t gesture_time;
 static Client *overview_drag_client;
 static Client *overview_focus_client;
 static int overview_dragging;
@@ -852,6 +896,7 @@ animstop(Monitor *m)
 		c->anim.fadein = 0;
 		c->anim.workspace = 0;
 		c->anim.hide = 0;
+		c->anim.swipe = 0;
 		c->anim.zoom = 0;
 		clientunscale(c);
 		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
@@ -1424,7 +1469,7 @@ arrange(Monitor *m)
 		if (c->mon == m) {
 			int vis = VISIBLEON(c, m) && (!fs || c == fs
 					|| (SCROLLLT(m) && fs->isfakefull));
-			int render = vis || (c->anim.workspace && c->anim.hide);
+			int render = vis || (c->anim.workspace && c->anim.hide) || wsdragshows(c);
 			wlr_scene_node_set_enabled(&c->scene->node, render);
 			client_set_suspended(c, !vis);
 		}
@@ -1613,6 +1658,206 @@ swipefocus(int dir)
 	warpcursor = oldwarp;
 }
 
+static int
+wsdragshows(Client *c)
+{
+	return wsdrag.active && wsdrag.dir && c->mon == wsdrag.m && c->ws == wsdrag.nb;
+}
+
+static Client *
+wsfullscreen(Monitor *m, unsigned int ws)
+{
+	Client *c;
+
+	wl_list_for_each(c, &clients, link)
+		if (c->mon == m && c->ws == ws && (c->isfullscreen || c->isfakefull))
+			return c;
+	return NULL;
+}
+
+/* lay out a workspace that is not on screen, so it can be shown sliding in */
+static void
+wsdragtile(Monitor *m, unsigned int ws)
+{
+	unsigned int cur = m->ws;
+	Client *c;
+
+	if (!wsfullscreen(m, ws)) {
+		m->ws = ws;
+		if (SCROLLLT(m))
+			scroll_tile(m);
+		else
+			bsp_tile(m->tree[ws], m->w);
+		m->ws = cur;
+	}
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon != m || c->ws != ws)
+			continue;
+		c->anim.active = c->anim.workspace = c->anim.hide = 0;
+	}
+}
+
+static int
+wsdragspan(void)
+{
+	return wsdrag.vertical ? wsdrag.m->m.height : wsdrag.m->m.width;
+}
+
+static double
+wsdragprogress(void)
+{
+	double p = wsdrag.pos / MAX(50, swipe_distance);
+
+	return p < -1.0 ? -1.0 : p > 1.0 ? 1.0 : p;
+}
+
+static void
+wsdragmove(Client *c, int off)
+{
+	clientplace(c, c->geom.x + (wsdrag.vertical ? 0 : off),
+			c->geom.y + (wsdrag.vertical ? off : 0));
+}
+
+static void
+wsdragplace(void)
+{
+	Monitor *m = wsdrag.m;
+	Client *c, *fs;
+	int span = wsdragspan(), off = (int)lround(wsdragprogress() * span);
+	int dir = off < 0 ? 1 : off > 0 ? -1 : wsdrag.dir;
+
+	if (dir != wsdrag.dir) {
+		/* the other neighbour: put the old one away, lay out the new one */
+		if (wsdrag.dir)
+			wl_list_for_each(c, &clients, link)
+				if (c->mon == m && c->ws == wsdrag.nb)
+					wlr_scene_node_set_enabled(&c->scene->node, 0);
+		wsdrag.dir = dir;
+		wsdrag.nb = (m->ws + NUMWS + dir) % NUMWS;
+		wsdragtile(m, wsdrag.nb);
+	}
+	fs = wsfullscreen(m, wsdrag.nb);
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon != m || client_is_unmanaged(c))
+			continue;
+		if (c->ws == m->ws && c->scene->node.enabled) {
+			wsdragmove(c, off);
+		} else if (wsdrag.dir && c->ws == wsdrag.nb && (!fs || c == fs)) {
+			wlr_scene_node_set_enabled(&c->scene->node, 1);
+			wsdragmove(c, off + wsdrag.dir * span);
+		}
+	}
+}
+
+static void
+wsdragbegin(Monitor *m, int vertical, double pos)
+{
+	animstop(m);
+	wsdrag.m = m;
+	wsdrag.active = 1;
+	wsdrag.vertical = vertical;
+	wsdrag.dir = 0;
+	wsdrag.pos = pos;
+	wsdrag.vel = 0.0;
+	wsdrag.last = gesture_time;
+	wsdragplace();
+}
+
+static void
+wsdragupdate(double d)
+{
+	uint32_t dt = gesture_time - wsdrag.last;
+
+	wsdrag.pos += d;
+	if (dt > 0 && dt < 100)
+		wsdrag.vel = wsdrag.vel * 0.5 + (d / dt) * 0.5;
+	else if (dt >= 100)
+		wsdrag.vel = 0.0;
+	wsdrag.last = gesture_time;
+	wsdragplace();
+}
+
+static void
+wsdraganim(Client *c, int tooff, int hide, int dur)
+{
+	c->anim.from.x = c->scene->node.x;
+	c->anim.from.y = c->scene->node.y;
+	c->anim.to.x = c->geom.x + (wsdrag.vertical ? 0 : tooff);
+	c->anim.to.y = c->geom.y + (wsdrag.vertical ? tooff : 0);
+	c->anim.fadein = 0;
+	c->anim.zoom = 0;
+	c->anim.workspace = 1;
+	c->anim.hide = hide;
+	c->anim.swipe = dur;
+	c->anim.active = 1;
+	c->anim.t = 0.0f;
+}
+
+/* let go: finish the switch when the fingers went past half way, or were
+ * still moving fast enough to get there; otherwise spring back */
+static void
+wsdragend(int cancelled)
+{
+	Monitor *m = wsdrag.m;
+	Client *c;
+	double p = wsdragprogress();
+	double proj = p + wsdrag.vel / MAX(50, swipe_distance) * 180.0;
+	int span = wsdragspan(), dir = wsdrag.dir, commit, dur;
+	unsigned int oldws = m->ws;
+
+	commit = !cancelled && dir
+			&& ((dir > 0 && p < 0.0 && proj <= -0.5) || (dir < 0 && p > 0.0 && proj >= 0.5));
+	dur = (int)(MAX(180, animation_duration * 5 / 4)
+			* (commit ? 1.0 - fabs(p) : fabs(p)));
+	/* a fast flick finishes quicker, never slower than the fingers moved */
+	if (fabs(wsdrag.vel) > 0.01) {
+		int left = (int)((commit ? 1.0 - fabs(p) : fabs(p)) * span);
+		int bypace = (int)(left / (fabs(wsdrag.vel) / MAX(50, swipe_distance) * span) * 2.2);
+		dur = MIN(dur, bypace);
+	}
+	dur = MAX(90, dur);
+	wsdrag.active = 0;
+
+	if (!animations || animation_duration <= 0) {
+		if (commit) {
+			Arg a = {.ui = wsdrag.nb};
+			viewws(&a);
+		} else {
+			animstop(m);
+			arrange(m);
+		}
+		return;
+	}
+	if (commit) {
+		wl_list_for_each(c, &clients, link)
+			if (c->mon == m && c->ws == oldws && c->scene->node.enabled
+					&& !client_is_unmanaged(c))
+				wsdraganim(c, -dir * span, 1, dur);
+		m->ws = wsdrag.nb;
+		focusclient(focustop(m), 1);
+		arrange(m);
+		wl_list_for_each(c, &clients, link) {
+			if (c->mon != m || !VISIBLEON(c, m) || !c->scene->node.enabled
+					|| client_is_unmanaged(c))
+				continue;
+			c->anim.active = 0;
+			wsdragmove(c, (int)lround(p * span) + dir * span);
+			wsdraganim(c, 0, 0, dur);
+		}
+	} else {
+		wl_list_for_each(c, &clients, link) {
+			if (c->mon != m || client_is_unmanaged(c) || !c->scene->node.enabled)
+				continue;
+			if (c->ws == oldws)
+				wsdraganim(c, 0, 0, dur);
+			else if (dir && c->ws == wsdrag.nb)
+				wsdraganim(c, dir * span, 1, dur);
+		}
+		arrange(m);
+	}
+	animkick(m);
+}
+
 void
 gesturebegin(uint32_t fingers)
 {
@@ -1624,6 +1869,7 @@ gesturebegin(uint32_t fingers)
 	overview_swipe_active = !locked && (fingers == 3 || fingers == 4);
 	overview_swipe_triggered = 0;
 	overview_swipe_dx = overview_swipe_dy = 0.0;
+	wsdrag.refused = 0;
 	if (!overview_swipe_active)
 		return;
 	m = xytomon(cursor->x, cursor->y);
@@ -1647,6 +1893,26 @@ gestureupdate(uint32_t fingers, double dx, double dy)
 		return;
 	overview_swipe_dx += dx;
 	overview_swipe_dy += dy;
+
+	/* workspaces follow the fingers along the way they slide: sideways in
+	 * BSP, up and down in the scroll layout */
+	if (wsdrag.active) {
+		wsdragupdate(wsdrag.vertical ? dy : dx);
+		return;
+	}
+	if (!wsdrag.refused && !overview_swipe_triggered && !overview_visible
+			&& !DRIFTLT(selmon) && swipe_distance > 0
+			&& hypot(overview_swipe_dx, overview_swipe_dy) >= 8.0) {
+		int vertical = SCROLLLT(selmon);
+		double along = vertical ? overview_swipe_dy : overview_swipe_dx;
+		double across = vertical ? overview_swipe_dx : overview_swipe_dy;
+
+		if ((fingers == 3 || !vertical) && fabs(along) > fabs(across) * 1.2) {
+			wsdragbegin(selmon, vertical, along);
+			return;
+		}
+		wsdrag.refused = 1;
+	}
 
 	if (fingers == 4) {
 		/* four fingers walk the workspaces and open the overview in every
@@ -1731,12 +1997,17 @@ swipeupdatenotify(struct wl_listener *listener, void *data)
 {
 	struct wlr_pointer_swipe_update_event *event = data;
 
+	gesture_time = event->time_msec;
 	gestureupdate(event->fingers, event->dx, event->dy);
 }
 
 void
 swipeendnotify(struct wl_listener *listener, void *data)
 {
+	struct wlr_pointer_swipe_end_event *event = data;
+
+	if (wsdrag.active)
+		wsdragend(event->cancelled);
 	overview_swipe_active = 0;
 	overview_swipe_triggered = 0;
 	overview_swipe_dx = overview_swipe_dy = 0.0;
@@ -1779,6 +2050,7 @@ pinchupdatenotify(struct wl_listener *listener, void *data)
 				overviewset(0);
 			}
 		}
+		gesture_time = event->time_msec;
 		gestureupdate(event->fingers, event->dx, event->dy);
 		return;
 	}
@@ -1792,6 +2064,10 @@ pinchupdatenotify(struct wl_listener *listener, void *data)
 void
 pinchendnotify(struct wl_listener *listener, void *data)
 {
+	struct wlr_pointer_pinch_end_event *event = data;
+
+	if (wsdrag.active)
+		wsdragend(event->cancelled);
 	drift_pinch_done = 0;
 	overview_swipe_active = 0;
 	overview_swipe_triggered = 0;
@@ -3488,6 +3764,11 @@ cleanupmon(struct wl_listener *listener, void *data)
 			wlr_layer_surface_v1_destroy(l->layer_surface);
 	}
 
+	if (wsdrag.m == m) {
+		wsdrag.active = 0;
+		wsdrag.m = NULL;
+	}
+
 	if (grabm == m) {
 		grabm = NULL;
 		if (cursor_mode == CurDriftPan)
@@ -4151,6 +4432,11 @@ mirrorstart(Monitor *m)
 		wl_list_for_each_safe(l, tmp, &m->layers[i], link)
 			wlr_layer_surface_v1_destroy(l->layer_surface);
 	}
+	if (wsdrag.m == m) {
+		wsdrag.active = 0;
+		wsdrag.m = NULL;
+	}
+
 	if (grabm == m) {
 		grabm = NULL;
 		if (cursor_mode == CurDriftPan)
@@ -6453,7 +6739,7 @@ keybinding(uint32_t mods, xkb_keysym_t sym)
 void
 keypress(struct wl_listener *listener, void *data)
 {
-	int i, super;
+	int i, super, macrohandled = 0;
 	/* This event is raised when a key is pressed or released. */
 	KeyboardGroup *group = wl_container_of(listener, group, key);
 	struct wlr_keyboard_key_event *event = data;
@@ -6488,9 +6774,17 @@ keypress(struct wl_listener *listener, void *data)
 		handled = 1;
 	}
 
+	/* Macro triggers need both edges: hold macros stop on release and every
+	 * trigger release is swallowed so clients never receive an orphaned key. */
+	if (!locked && !super && !overviewkeypassthrough()) {
+		for (i = 0; i < nsyms && !macrohandled; i++)
+			macrohandled = macrohandle(mods, syms[i], event->keycode, event->state);
+		handled = macrohandled || handled;
+	}
+
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
-	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED && !super
+	if (!macrohandled && !locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED && !super
 			&& !overviewkeypassthrough()) {
 		if (overview_visible)
 			group->overview_keycode = event->keycode;
@@ -6506,7 +6800,7 @@ keypress(struct wl_listener *listener, void *data)
 			group->overview_keycode = 0;
 	}
 
-	if (handled && !super && !group->overview_keycode
+	if (handled && !macrohandled && !super && !group->overview_keycode
 			&& group->wlr_group->keyboard.repeat_info.delay > 0) {
 		group->mods = mods;
 		group->keysyms = syms;
@@ -6572,6 +6866,7 @@ locksession(struct wl_listener *listener, void *data)
 {
 	struct wlr_session_lock_v1 *session_lock = data;
 	SessionLock *lock;
+	macrostopall();
 	overviewset(0);
 	wlr_scene_node_set_enabled(&locked_bg->node, 1);
 	if (cur_lock) {
@@ -7208,7 +7503,9 @@ rendermon(struct wl_listener *listener, void *data)
 				 * strip panning to a column, a retile), so the
 				 * overview is redrawn every frame it runs */
 				overview_dirty |= overview_visible;
-				duration = c->anim.workspace
+				duration = c->anim.workspace && c->anim.swipe
+						? c->anim.swipe
+						: c->anim.workspace
 						? MAX(180, animation_duration * 5 / 4)
 						: c->anim.fadein
 						? MAX(60, animation_duration_open)
@@ -7237,6 +7534,7 @@ rendermon(struct wl_listener *listener, void *data)
 					}
 					c->anim.workspace = 0;
 					c->anim.hide = 0;
+					c->anim.swipe = 0;
 					if (c->anim.fadein) {
 						c->anim.fadein = 0;
 						if (c->surfbuf)
@@ -7244,7 +7542,9 @@ rendermon(struct wl_listener *listener, void *data)
 					}
 					continue;
 				}
-				e = c->anim.workspace
+				e = c->anim.workspace && c->anim.swipe
+						? 1.0f - powf(1.0f - c->anim.t, 3.0f)
+						: c->anim.workspace
 						? c->anim.t * c->anim.t * (3.0f - 2.0f * c->anim.t)
 						: c->anim.fadein
 						? animease(animation_curve_open, c->anim.t)
@@ -7732,6 +8032,383 @@ cfgbindcombo(char *combo, uint32_t *mods, xkb_keysym_t *sym)
 	return *sym != XKB_KEY_NoSymbol;
 }
 
+static uint32_t
+macrobutton(const char *name)
+{
+	if (!strcmp(name, "right"))
+		return BTN_RIGHT;
+	if (!strcmp(name, "middle"))
+		return BTN_MIDDLE;
+	return BTN_LEFT;
+}
+
+static void
+macroaddstep(Macro *m, MacroStep step)
+{
+	if (!(m->steps = realloc(m->steps, (m->nsteps + 1) * sizeof(*m->steps))))
+		die("config: realloc:");
+	m->steps[m->nsteps++] = step;
+}
+
+static void
+cfgmacro(char *value)
+{
+	Macro m = { .type = MacroSequence, .mode = MacroHold, .interval = 80,
+		.press_ms = 10, .cps = 10, .button = BTN_LEFT };
+	char *tok, *eq, *save = NULL, *sequence = NULL;
+	char trigger[96] = {0};
+	size_t i;
+
+	if (!(tok = strtok_r(value, " \t", &save))) {
+		cfgerror("macro needs a name");
+		return;
+	}
+	snprintf(m.name, sizeof m.name, "%s", tok);
+	while ((tok = strtok_r(NULL, " \t", &save))) {
+		if (!(eq = strchr(tok, '='))) {
+			cfgerror("macro %s: expected key=value, got '%s'", m.name, tok);
+			goto bad;
+		}
+		*eq++ = '\0';
+		if (!strcmp(tok, "trigger"))
+			snprintf(trigger, sizeof trigger, "%s", eq);
+		else if (!strcmp(tok, "type"))
+			m.type = !strcmp(eq, "click") ? MacroClick : MacroSequence;
+		else if (!strcmp(tok, "mode"))
+			m.mode = !strcmp(eq, "once") ? MacroOnce
+					: !strcmp(eq, "toggle") ? MacroToggle : MacroHold;
+		else if (!strcmp(tok, "button"))
+			m.button = macrobutton(eq);
+		else if (!strcmp(tok, "cps"))
+			m.cps = MIN(200, MAX(1, atoi(eq)));
+		else if (!strcmp(tok, "interval"))
+			m.interval = MIN(600000, MAX(0, atoi(eq)));
+		else if (!strcmp(tok, "press"))
+			m.press_ms = MIN(1000, MAX(1, atoi(eq)));
+		else if (!strcmp(tok, "sequence"))
+			sequence = strdup(eq);
+		else {
+			cfgerror("macro %s: unknown option '%s'", m.name, tok);
+			goto bad;
+		}
+	}
+	if (!*trigger || !cfgbindcombo(trigger, &m.trigger_mods, &m.trigger_sym)) {
+		cfgerror("macro %s: bad or missing trigger", m.name);
+		goto bad;
+	}
+	if (m.type == MacroSequence) {
+		char *part, *ssave = NULL;
+		if (!sequence || !*sequence) {
+			cfgerror("macro %s: sequence is empty", m.name);
+			goto bad;
+		}
+		for (part = strtok_r(sequence, ",", &ssave); part;
+				part = strtok_r(NULL, ",", &ssave)) {
+			MacroStep step = {0};
+			char combo[96];
+			part = cfgtrim(part);
+			if (!strncmp(part, "wait:", 5)) {
+				step.type = MacroStepWait;
+				step.delay = MIN(600000, MAX(1, atoi(part + 5)));
+			} else if (!strncmp(part, "click:", 6)) {
+				step.type = MacroStepClick;
+				step.button = macrobutton(part + 6);
+			} else {
+				step.type = MacroStepKey;
+				snprintf(combo, sizeof combo, "%s", part);
+				if (!cfgbindcombo(combo, &step.mods, &step.keysym)) {
+					cfgerror("macro %s: bad step '%s'", m.name, part);
+					goto bad;
+				}
+			}
+			macroaddstep(&m, step);
+		}
+	}
+	for (i = 0; i < nmacros; i++) {
+		if (!strcmp(macros[i].name, m.name)) {
+			cfgerror("duplicate macro name '%s'", m.name);
+			goto bad;
+		}
+		if (macros[i].trigger_mods == m.trigger_mods
+				&& xkb_keysym_to_lower(macros[i].trigger_sym)
+				== xkb_keysym_to_lower(m.trigger_sym)) {
+			cfgerror("macro %s: trigger is already used by %s", m.name,
+					macros[i].name);
+			goto bad;
+		}
+	}
+	if (!(macros = realloc(macros, (nmacros + 1) * sizeof(*macros))))
+		die("config: realloc:");
+	macros[nmacros++] = m;
+	free(sequence);
+	return;
+bad:
+	free(sequence);
+	free(m.steps);
+}
+
+static uint32_t
+macromodmask(struct xkb_keymap *keymap, uint32_t mods)
+{
+	static const struct { uint32_t bit; const char *name; } map[] = {
+		{ WLR_MODIFIER_SHIFT, XKB_MOD_NAME_SHIFT },
+		{ WLR_MODIFIER_CTRL, XKB_MOD_NAME_CTRL },
+		{ WLR_MODIFIER_ALT, XKB_MOD_NAME_ALT },
+		{ WLR_MODIFIER_LOGO, XKB_MOD_NAME_LOGO },
+	};
+	uint32_t mask = 0;
+	size_t i;
+	for (i = 0; i < LENGTH(map); i++) {
+		xkb_mod_index_t index;
+		if (!(mods & map[i].bit))
+			continue;
+		index = xkb_keymap_mod_get_index(keymap, map[i].name);
+		if (index != XKB_MOD_INVALID && index < 32)
+			mask |= 1u << index;
+	}
+	return mask;
+}
+
+static uint32_t
+macrokeycode(xkb_keysym_t wanted)
+{
+	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
+	struct xkb_keymap *keymap = keyboard ? keyboard->keymap : NULL;
+	xkb_keycode_t code, min, max;
+	const xkb_keysym_t *syms;
+	int n, layout;
+
+	if (!keymap)
+		return 0;
+	wanted = xkb_keysym_to_lower(wanted);
+	min = xkb_keymap_min_keycode(keymap);
+	max = xkb_keymap_max_keycode(keymap);
+	for (code = min; code <= max; code++) {
+		for (layout = 0; layout < (int)xkb_keymap_num_layouts_for_key(keymap, code);
+				layout++) {
+			n = xkb_keymap_key_get_syms_by_level(keymap, code, layout, 0, &syms);
+			if (n > 0 && xkb_keysym_to_lower(syms[0]) == wanted)
+				return code >= 8 ? code - 8 : code;
+		}
+	}
+	return 0;
+}
+
+static void
+macromodifiers(uint32_t mods)
+{
+	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
+	struct wlr_keyboard_modifiers synthetic = {0};
+	if (!keyboard || !keyboard->keymap)
+		return;
+	synthetic.depressed = macromodmask(keyboard->keymap, mods);
+	wlr_seat_keyboard_notify_modifiers(seat, &synthetic);
+}
+
+static void
+macrorestoremodifiers(void)
+{
+	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
+	if (keyboard)
+		wlr_seat_keyboard_notify_modifiers(seat, &keyboard->modifiers);
+}
+
+static void
+macrorelease(Macro *m)
+{
+	if (!m->down_type)
+		return;
+	if (m->down_type == MacroStepKey) {
+		wlr_seat_keyboard_notify_key(seat, now_ms(), m->down_code,
+				WL_KEYBOARD_KEY_STATE_RELEASED);
+		macrorestoremodifiers();
+	} else {
+		wlr_seat_pointer_notify_button(seat, now_ms(), m->down_code,
+				WL_POINTER_BUTTON_STATE_RELEASED);
+		wlr_seat_pointer_notify_frame(seat);
+	}
+	m->down_type = 0;
+}
+
+static void
+macrostop(Macro *m)
+{
+	macrorelease(m);
+	m->running = 0;
+	m->pos = 0;
+	if (m->timer)
+		wl_event_source_timer_update(m->timer, 0);
+}
+
+static int
+macrotick(void *data)
+{
+	Macro *m = data;
+	MacroStep *step;
+	int delay;
+	uint32_t code;
+
+	if (!m->running || locked)
+		return 0;
+	if (m->type == MacroClick) {
+		int held;
+		delay = MAX(1, 1000 / MAX(1, m->cps));
+		held = MIN(m->press_ms, MAX(1, delay - 1));
+		if (m->down_type) {
+			macrorelease(m);
+			if (m->mode == MacroOnce) {
+				macrostop(m);
+				return 0;
+			}
+			wl_event_source_timer_update(m->timer, MAX(1, delay - held));
+		} else {
+			wlr_seat_pointer_notify_button(seat, now_ms(), m->button,
+					WL_POINTER_BUTTON_STATE_PRESSED);
+			wlr_seat_pointer_notify_frame(seat);
+			m->down_type = MacroStepClick;
+			m->down_code = m->button;
+			wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+			wl_event_source_timer_update(m->timer, held);
+		}
+		return 0;
+	}
+
+	if (m->down_type) {
+		macrorelease(m);
+		m->pos++;
+		if (m->pos >= m->nsteps) {
+			if (m->mode == MacroOnce) {
+				macrostop(m);
+				return 0;
+			}
+			m->pos = 0;
+		}
+		wl_event_source_timer_update(m->timer, MAX(1, m->interval));
+		return 0;
+	}
+	if (!m->nsteps) {
+		macrostop(m);
+		return 0;
+	}
+	if (m->pos >= m->nsteps) {
+		if (m->mode == MacroOnce) {
+			macrostop(m);
+			return 0;
+		}
+		m->pos = 0;
+	}
+	step = &m->steps[m->pos];
+	if (step->type == MacroStepWait) {
+		m->pos++;
+		wl_event_source_timer_update(m->timer, step->delay);
+		return 0;
+	}
+	if (step->type == MacroStepClick) {
+		wlr_seat_pointer_notify_button(seat, now_ms(), step->button,
+				WL_POINTER_BUTTON_STATE_PRESSED);
+		wlr_seat_pointer_notify_frame(seat);
+		m->down_type = MacroStepClick;
+		m->down_code = step->button;
+	} else {
+		if (!(code = macrokeycode(step->keysym))) {
+			m->pos++;
+			wl_event_source_timer_update(m->timer, 1);
+			return 0;
+		}
+		macromodifiers(step->mods);
+		wlr_seat_keyboard_notify_key(seat, now_ms(), code,
+				WL_KEYBOARD_KEY_STATE_PRESSED);
+		m->down_type = MacroStepKey;
+		m->down_code = code;
+		m->down_mods = step->mods;
+	}
+	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+	wl_event_source_timer_update(m->timer, m->press_ms);
+	return 0;
+}
+
+static void
+macrostart(Macro *m)
+{
+	if (m->running)
+		macrostop(m);
+	m->running = 1;
+	m->pos = 0;
+	if (!m->timer)
+		m->timer = wl_event_loop_add_timer(event_loop, macrotick, m);
+	if (!m->timer) {
+		m->running = 0;
+		return;
+	}
+	macrotick(m);
+}
+
+static int
+macrohandle(uint32_t mods, xkb_keysym_t sym, uint32_t keycode,
+		enum wl_keyboard_key_state state)
+{
+	Macro *m;
+	size_t i;
+
+	if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+		for (i = 0; i < nmacros; i++) {
+			m = &macros[i];
+			if (!m->trigger_down || m->trigger_keycode != keycode)
+				continue;
+			m->trigger_down = 0;
+			if (m->mode == MacroHold)
+				macrostop(m);
+			return 1;
+		}
+		return 0;
+	}
+	for (i = 0; i < nmacros; i++) {
+		m = &macros[i];
+		if (CLEANMASK(mods) != CLEANMASK(m->trigger_mods)
+				|| xkb_keysym_to_lower(sym) != xkb_keysym_to_lower(m->trigger_sym))
+			continue;
+		if (m->trigger_down)
+			return 1;
+		m->trigger_down = 1;
+		m->trigger_keycode = keycode;
+		if (m->mode == MacroToggle && m->running)
+			macrostop(m);
+		else
+			macrostart(m);
+		return 1;
+	}
+	return 0;
+}
+
+static void
+macrostopall(void)
+{
+	size_t i;
+	for (i = 0; i < nmacros; i++)
+		macrostop(&macros[i]);
+}
+
+static void
+macrostopaction(const Arg *arg)
+{
+	macrostopall();
+}
+
+static void
+macrofreeall(void)
+{
+	size_t i;
+	macrostopall();
+	for (i = 0; i < nmacros; i++) {
+		if (macros[i].timer)
+			wl_event_source_remove(macros[i].timer);
+		free(macros[i].steps);
+	}
+	free(macros);
+	macros = NULL;
+	nmacros = 0;
+}
+
 static int
 cfgaction(const char *act, void (**func)(const Arg *), Arg *arg)
 {
@@ -7740,6 +8417,7 @@ cfgaction(const char *act, void (**func)(const Arg *), Arg *arg)
 		void (*func)(const Arg *);
 		Arg arg;
 	} acts[] = {
+		{ "macro:stop_all",            macrostopaction,      {0} },
 		{ "wm:quit",                  quit,                 {0} },
 		{ "wm:reload",                reloadconfig,         {0} },
 		{ "wm:restart",               reloadconfig,         {0} },
@@ -8152,7 +8830,9 @@ readconfig(void)
 		*v++ = '\0';
 		k = cfgtrim(k);
 		v = cfgtrim(v);
-		if (!strcmp(k, "bind_insert") || !strcmp(k, "bind_normal")) {
+		if (!strcmp(k, "macro")) {
+			cfgmacro(v);
+		} else if (!strcmp(k, "bind_insert") || !strcmp(k, "bind_normal")) {
 			uint32_t mods;
 			xkb_keysym_t sym;
 			void (*func)(const Arg *);
@@ -8191,6 +8871,8 @@ readconfig(void)
 			drift_zoom_max = MAX(1.0f, strtof(v, NULL));
 		} else if (!strcmp(k, "drift_zoom_step")) {
 			drift_zoom_step = MAX(1.01f, strtof(v, NULL));
+		} else if (!strcmp(k, "swipe_distance")) {
+			swipe_distance = MAX(0, atoi(v));
 		} else if (!strcmp(k, "drift_pan_speed")) {
 			drift_pan_speed = MAX(0.1f, strtof(v, NULL));
 		} else if (!strcmp(k, "gap")) {
@@ -8569,6 +9251,7 @@ reloadconfig(const Arg *arg)
 	for (i = 0; i < nautostarts; i++)
 		free(autostarts[i]);
 	nautostarts = 0;
+	macrofreeall();
 	free(runkeys);
 	free(runnormalkeys);
 	runkeys = runnormalkeys = NULL;
@@ -8827,6 +9510,7 @@ viewws(const Arg *arg)
 			c->anim.fadein = 0;
 			c->anim.workspace = 1;
 			c->anim.hide = 1;
+			c->anim.swipe = 0;
 			c->anim.active = 1;
 			c->anim.t = 0.0f;
 			started = 1;
@@ -8850,6 +9534,7 @@ viewws(const Arg *arg)
 			c->anim.fadein = 0;
 			c->anim.workspace = 1;
 			c->anim.hide = 0;
+			c->anim.swipe = 0;
 			c->anim.active = 1;
 			c->anim.t = 0.0f;
 			clientplace(c, c->anim.from.x, c->anim.from.y);
