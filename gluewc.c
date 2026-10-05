@@ -6987,6 +6987,24 @@ mapnotify(struct wl_listener *listener, void *data)
 		applyrules(c);
 	}
 
+	/* Wayland windows carry no position and an X11 one often asks for the
+	 * corner: a floating window opening there sits over the bar. Dialogs
+	 * go to the centre of their parent, the rest to the window area. */
+	if (c->isfloating && c->mon && !c->isfullscreen
+			&& ((p && !client_is_x11(c))
+				|| (c->geom.x - c->mon->m.x < 48 && c->geom.y - c->mon->m.y < 48))) {
+		struct wlr_box area = c->mon->w;
+		if (p && p->mon == c->mon)
+			area = p->geom;
+		c->geom.x = area.x + (area.width - c->geom.width) / 2;
+		c->geom.y = area.y + (area.height - c->geom.height) / 2;
+		c->geom.x = MAX(c->mon->w.x, MIN(c->geom.x,
+				c->mon->w.x + c->mon->w.width - c->geom.width));
+		c->geom.y = MAX(c->mon->w.y, MIN(c->geom.y,
+				c->mon->w.y + c->mon->w.height - c->geom.height));
+		resize(c, c->geom, 0);
+	}
+
 	/* Pop the new window in */
 	if (animations && animation_type_open != AnimNone && animation_duration_open > 0
 			&& c->mon && VISIBLEON(c, c->mon)) {
