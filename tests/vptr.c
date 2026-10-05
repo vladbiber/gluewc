@@ -1,4 +1,4 @@
-/* vptr — virtual-pointer injector for driving gluewc in headless tests.
+/* vptr - virtual-pointer injector for driving gluewc in headless tests.
  * Usage: vptr <cmd>...
  *   abs X Y            move to fraction of the layout (0.0–1.0)
  *   line X0 Y0 X1 Y1 N interpolated motion in N steps (20ms apart)

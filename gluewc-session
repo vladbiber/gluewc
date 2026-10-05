@@ -27,8 +27,8 @@ fi
 RUNDIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 # D-Bus.  On a systemd (or dbus-broker) system the user bus is already up at
-# $XDG_RUNTIME_DIR/bus and everything else — pipewire, the portals, the
-# notification daemon — lives on it.  Starting a second bus with
+# $XDG_RUNTIME_DIR/bus and everything else - pipewire, the portals, the
+# notification daemon - lives on it.  Starting a second bus with
 # dbus-run-session here would split the desktop in two: the apps started by
 # the compositor on one bus, the services on the other, and nothing finds
 # anything.  So the existing bus is used when there is one, and

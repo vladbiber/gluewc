@@ -1,4 +1,4 @@
-/* wshot [file] [output-index] — wlr-screencopy screenshot of one output (the
+/* wshot [file] [output-index] - wlr-screencopy screenshot of one output (the
  * first by default), written as PPM. */
 #include <stdio.h>
 #include <stdlib.h>

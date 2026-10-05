@@ -1,5 +1,5 @@
 /*
- * gluewc-msg — talk to gluewc over dwl-ipc-unstable-v2, the protocol the
+ * gluewc-msg - talk to gluewc over dwl-ipc-unstable-v2, the protocol the
  * compositor already speaks to bars.  This is what a shell without a native
  * dwl-ipc module (upstream quickshell, a script) uses to switch workspaces.
  *

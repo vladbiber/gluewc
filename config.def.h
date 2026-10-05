@@ -3,7 +3,7 @@
                         ((hex >> 16) & 0xFF) / 255.0f, \
                         ((hex >> 8) & 0xFF) / 255.0f, \
                         (hex & 0xFF) / 255.0f }
-/* appearance — the non-const values can be overridden at runtime from
+/* appearance - the non-const values can be overridden at runtime from
  * ~/.config/gluewc/config.conf */
 static const int sloppyfocus               = 1;  /* focus follows mouse */
 static int warpcursor                      = 1;  /* warp cursor to focused window on keyboard focus, like nvwm */
@@ -38,7 +38,7 @@ static float scroll_colfrac                = 0.5f; /* default column width in th
 static int default_layout                  = LtBSP; /* layout new monitors start in: LtBSP, LtScroll or LtDrift */
 static int remember_layout                 = 1;     /* reopen in the layout the last session ended in */
 static int start_in_overview               = 0;     /* open the session on the overview */
-/* drift layout — driftwm-style infinite canvas */
+/* drift layout - driftwm-style infinite canvas */
 static int drift_snap                      = 24;    /* edge snapping distance, in canvas pixels */
 static int drift_nudge                     = 20;    /* pixels a window moves per keyboard nudge */
 static float drift_zoom_min                = 0.2f;  /* how far the camera can zoom out */

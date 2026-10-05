@@ -2039,7 +2039,7 @@ pinchupdatenotify(struct wl_listener *listener, void *data)
 	if (event->fingers >= 3) {
 		/* libinput reports a three-finger swipe as a pinch as soon as the
 		 * fingers drift apart a little, so the movement is fed to the swipe
-		 * handler instead of the zoom — otherwise the gesture would either
+		 * handler instead of the zoom - otherwise the gesture would either
 		 * do nothing or zoom by accident */
 		if (event->fingers >= 4 && !drift_pinch_done) {
 			if (event->scale <= 0.75) {
@@ -2462,7 +2462,7 @@ scroll_tile(Monitor *m)
 	fcol = focus ? focus->col : NULL;
 
 	/* total strip width, then scroll just enough to reveal the focused
-	 * column — the columns themselves never move, only the viewport */
+	 * column - the columns themselves never move, only the viewport */
 	wl_list_for_each(col, &m->cols[m->ws], link) {
 		if (scroll_coltiled(col))
 			total += scroll_colwidth(m, col);
@@ -2689,7 +2689,7 @@ driftattach(Monitor *m, unsigned int ws, Client *c)
 	if (!c->canvassized || c->canvas.width <= 0 || c->canvas.height <= 0) {
 		/* arriving from another layout or freshly mapped: there the
 		 * geometry is the real size.  A window that already lives on a
-		 * canvas keeps its own size instead — c->geom would be the
+		 * canvas keeps its own size instead - c->geom would be the
 		 * zoomed screen box, which would shrink it on every move. */
 		c->canvas.width = MAX(1 + bw, c->geom.width);
 		c->canvas.height = MAX(1 + bw, c->geom.height);
@@ -3198,7 +3198,7 @@ driftresizeto(Client *c, double cx, double cy)
  * wlroots has no scale on a scene tree, so the zoom is applied to the client's
  * buffers: the destination size is scaled while the source box wlroots
  * computed is left alone.  Every value below is derived from protocol state,
- * so re-running this over an already scaled tree is a no-op — which is what
+ * so re-running this over an already scaled tree is a no-op - which is what
  * lets it run again after each commit and on every frame. */
 typedef struct {
 	struct wlr_surface *surface;
@@ -3363,7 +3363,7 @@ void
 driftscaleclient(Client *c, double z)
 {
 	/* wlr_scene_node_for_each_buffer() counts from the parent of the node it
-	 * is given, so everything here is relative to the client's scene tree —
+	 * is given, so everything here is relative to the client's scene tree -
 	 * which also keeps the open and retile animations working */
 	struct wlr_box clip, crop, vis;
 	int bw = (int)c->bw, r;
@@ -6082,8 +6082,8 @@ overviewwatchdog(void *data)
 {
 	/* While the overview is up the tiling layers are switched off and only
 	 * overviewfinish() turns them back on, so a closing transition that
-	 * never reaches its last frame — an output that stopped sending them,
-	 * a failed commit — would leave the screen without a single window on
+	 * never reaches its last frame - an output that stopped sending them,
+	 * a failed commit - would leave the screen without a single window on
 	 * it, nothing to click and nothing to type into.  Never wait forever. */
 	Monitor *m;
 
@@ -7257,7 +7257,7 @@ moveresize(const Arg *arg)
 	if (SCROLLLT(grabc->mon) && grabc->col && !grabc->isfloating
 			&& !grabc->isfakefull) {
 		/* niri-style direct manipulation: drag reorders the strip and
-		 * right-drag resizes the column — the window never floats */
+		 * right-drag resizes the column - the window never floats */
 		if (arg->ui == CurMove) {
 			cursor_mode = CurDragTile;
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "grabbing");
@@ -7273,7 +7273,7 @@ moveresize(const Arg *arg)
 	if (grabc->node && !grabc->isfloating && !grabc->isfakefull) {
 		/* bsp direct manipulation: drag swaps the window with the tile
 		 * under the cursor and right-drag moves the splits it sits
-		 * between — neither makes the window float */
+		 * between - neither makes the window float */
 		if (arg->ui == CurResize) {
 			/* the grab picks the edges the click is nearest, so
 			 * dragging away from the window always grows it */
@@ -7478,7 +7478,7 @@ rendermon(struct wl_listener *listener, void *data)
 	/* Render if no XDG clients have an outstanding resize and are visible on
 	 * this monitor.  A client that never acks must not hold the output
 	 * hostage: past RESIZEWAIT it is drawn at whatever size it has, or the
-	 * whole screen would stay frozen on the last frame — with an animation
+	 * whole screen would stay frozen on the last frame - with an animation
 	 * caught halfway, windows parked off screen and nothing focusable. */
 	wl_list_for_each(c, &clients, link) {
 		if (c->resize && !c->isfloating && client_is_rendered_on_mon(c, m)
@@ -8007,7 +8007,7 @@ cfganimtype(const char *s)
 static int
 cfgcurve(const char *s, float out[4])
 {
-	/* x1,y1,x2,y2 — the x values are clamped, as CSS does, so the curve
+	/* x1,y1,x2,y2 - the x values are clamped, as CSS does, so the curve
 	 * stays a function of time; the y values may overshoot on purpose */
 	float c[4];
 
@@ -8649,7 +8649,7 @@ cfgwatchevent(int fd, uint32_t mask, void *data)
 			} else if (!ev->len && (ev->mask & (IN_MOVE_SELF | IN_DELETE_SELF))) {
 				/* the directory was replaced under us: follow it.
 				 * Nameless events are otherwise the watch's own
-				 * bookkeeping — IN_IGNORED after a rearm above all —
+				 * bookkeeping - IN_IGNORED after a rearm above all -
 				 * and reloading on those never stops. */
 				gone = 1;
 			}
@@ -9428,7 +9428,7 @@ togglefakefullscreen(const Arg *arg)
 		setfullscreen(sel, 0);
 	if (SCROLLLT(selmon) && sel->col && !sel->isfloating
 			&& !sel->isfakefull) {
-		/* scroll layout: no fullscreen — just make the column as wide as
+		/* scroll layout: no fullscreen - just make the column as wide as
 		 * the screen and back, like a right-drag resize to full width */
 		scroll_maximize(sel);
 		return;

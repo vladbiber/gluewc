@@ -1,4 +1,4 @@
-/* vkbd — virtual-keyboard injector for driving gluewc in headless tests.
+/* vkbd - virtual-keyboard injector for driving gluewc in headless tests.
  * Usage: vkbd [M+][S+][C+]<key>...
  */
 #include <stdio.h>
