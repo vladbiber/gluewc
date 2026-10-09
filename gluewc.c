@@ -612,6 +612,8 @@ static Client *scroll_next(Monitor *m, Client *sel);
 static void scroll_swap(Client *sel, int dir);
 static void scroll_tile(Monitor *m);
 static int wsdragshows(Client *c);
+static void wsdragupdate(double d);
+static int wsdragframe(Monitor *m);
 static void swipefocus(int dir);
 static void overviewfocuscol(int dir);
 static void setcursor(struct wl_listener *listener, void *data);
@@ -714,8 +716,11 @@ static struct {
 	int active, vertical, dir, refused;
 	unsigned int nb;
 	double pos; /* finger travel along the axis */
-	double vel; /* finger speed, units per ms, smoothed */
-	uint32_t last;
+	double shown; /* on screen, eased toward pos each frame */
+	double hpos[8]; /* recent travel, for the release speed */
+	uint32_t ht[8];
+	int hn;
+	uint32_t lastframe;
 } wsdrag;
 static uint32_t gesture_time;
 static Client *overview_drag_client;
@@ -1704,11 +1709,17 @@ wsdragspan(void)
 }
 
 static double
-wsdragprogress(void)
+wsdragclamp(double travel)
 {
-	double p = wsdrag.pos / MAX(50, swipe_distance);
+	double p = travel / MAX(50, swipe_distance);
 
 	return p < -1.0 ? -1.0 : p > 1.0 ? 1.0 : p;
+}
+
+static double
+wsdragprogress(void)
+{
+	return wsdragclamp(wsdrag.shown);
 }
 
 static void
@@ -1758,23 +1769,63 @@ wsdragbegin(Monitor *m, int vertical, double pos)
 	wsdrag.vertical = vertical;
 	wsdrag.dir = 0;
 	wsdrag.pos = pos;
-	wsdrag.vel = 0.0;
-	wsdrag.last = gesture_time;
+	wsdrag.shown = 0.0;
+	wsdrag.hn = 0;
+	wsdrag.lastframe = 0;
 	wsdragplace();
+	wsdragupdate(0.0);
 }
 
 static void
 wsdragupdate(double d)
 {
-	uint32_t dt = gesture_time - wsdrag.last;
+	int i = wsdrag.hn++ % LENGTH(wsdrag.hpos);
 
 	wsdrag.pos += d;
-	if (dt > 0 && dt < 100)
-		wsdrag.vel = wsdrag.vel * 0.5 + (d / dt) * 0.5;
-	else if (dt >= 100)
-		wsdrag.vel = 0.0;
-	wsdrag.last = gesture_time;
+	wsdrag.hpos[i] = wsdrag.pos;
+	wsdrag.ht[i] = gesture_time;
+	/* drawn on the next frame, not per event */
+	wlr_output_schedule_frame(wsdrag.m->wlr_output);
+}
+
+/* finger speed over the last 100 ms, 0 if they stopped before lifting */
+static double
+wsdragvel(uint32_t end)
+{
+	int n = MIN(wsdrag.hn, (int)LENGTH(wsdrag.hpos)), k, i, j = -1;
+	int last = (wsdrag.hn - 1) % LENGTH(wsdrag.hpos);
+
+	if (n < 2 || end - wsdrag.ht[last] > 60)
+		return 0.0;
+	for (k = 1; k < n; k++) {
+		i = (wsdrag.hn - 1 - k) % LENGTH(wsdrag.hpos);
+		if (wsdrag.ht[last] - wsdrag.ht[i] > 100)
+			break;
+		j = i;
+	}
+	if (j < 0 || wsdrag.ht[last] == wsdrag.ht[j])
+		return 0.0;
+	return (wsdrag.hpos[last] - wsdrag.hpos[j])
+			/ (double)(wsdrag.ht[last] - wsdrag.ht[j]);
+}
+
+/* ease the shown position toward the fingers, once per frame */
+static int
+wsdragframe(Monitor *m)
+{
+	uint32_t t = now_ms();
+	double dt, a;
+
+	if (!wsdrag.active || wsdrag.m != m)
+		return 0;
+	dt = wsdrag.lastframe ? MIN(50, t - wsdrag.lastframe) : 16.0;
+	wsdrag.lastframe = t;
+	a = 1.0 - exp(-dt / 22.0);
+	wsdrag.shown += (wsdrag.pos - wsdrag.shown) * a;
+	if (fabs(wsdrag.pos - wsdrag.shown) < 0.05)
+		wsdrag.shown = wsdrag.pos;
 	wsdragplace();
+	return wsdrag.shown != wsdrag.pos;
 }
 
 static void
@@ -1796,26 +1847,26 @@ wsdraganim(Client *c, int tooff, int hide, int dur)
 /* let go: finish the switch when the fingers went past half way, or were
  * still moving fast enough to get there; otherwise spring back */
 static void
-wsdragend(int cancelled)
+wsdragend(int cancelled, uint32_t time)
 {
 	Monitor *m = wsdrag.m;
 	Client *c;
-	double p = wsdragprogress();
-	double proj = p + wsdrag.vel / MAX(50, swipe_distance) * 180.0;
+	double vel = wsdragvel(time);
+	double p = wsdragclamp(wsdrag.pos), shown = wsdragprogress();
+	double proj = p + vel / MAX(50, swipe_distance) * 180.0;
+	double left, speed;
 	int span = wsdragspan(), dir = wsdrag.dir, commit, dur;
 	unsigned int oldws = m->ws;
 
 	commit = !cancelled && dir
 			&& ((dir > 0 && p < 0.0 && proj <= -0.5) || (dir < 0 && p > 0.0 && proj >= 0.5));
-	dur = (int)(MAX(180, animation_duration * 5 / 4)
-			* (commit ? 1.0 - fabs(p) : fabs(p)));
-	/* a fast flick finishes quicker, never slower than the fingers moved */
-	if (fabs(wsdrag.vel) > 0.01) {
-		int left = (int)((commit ? 1.0 - fabs(p) : fabs(p)) * span);
-		int bypace = (int)(left / (fabs(wsdrag.vel) / MAX(50, swipe_distance) * span) * 2.2);
-		dur = MIN(dur, bypace);
-	}
-	dur = MAX(90, dur);
+	left = (commit ? 1.0 - fabs(shown) : fabs(shown)) * span;
+	dur = (int)(MAX(180, animation_duration * 5 / 4) * left / MAX(1, span));
+	/* the ease-out starts at 3x its mean speed: match the fingers */
+	speed = fabs(vel) / MAX(50, swipe_distance) * span;
+	if (speed > 0.05 && (commit ? vel * dir < 0.0 : vel * shown < 0.0))
+		dur = MIN(dur, (int)(3.0 * left / speed));
+	dur = MAX(120, dur);
 	wsdrag.active = 0;
 
 	if (!animations || animation_duration <= 0) {
@@ -1841,7 +1892,7 @@ wsdragend(int cancelled)
 					|| client_is_unmanaged(c))
 				continue;
 			c->anim.active = 0;
-			wsdragmove(c, (int)lround(p * span) + dir * span);
+			wsdragmove(c, (int)lround(shown * span) + dir * span);
 			wsdraganim(c, 0, 0, dur);
 		}
 	} else {
@@ -2007,7 +2058,7 @@ swipeendnotify(struct wl_listener *listener, void *data)
 	struct wlr_pointer_swipe_end_event *event = data;
 
 	if (wsdrag.active)
-		wsdragend(event->cancelled);
+		wsdragend(event->cancelled, event->time_msec);
 	overview_swipe_active = 0;
 	overview_swipe_triggered = 0;
 	overview_swipe_dx = overview_swipe_dy = 0.0;
@@ -2067,7 +2118,7 @@ pinchendnotify(struct wl_listener *listener, void *data)
 	struct wlr_pointer_pinch_end_event *event = data;
 
 	if (wsdrag.active)
-		wsdragend(event->cancelled);
+		wsdragend(event->cancelled, event->time_msec);
 	drift_pinch_done = 0;
 	overview_swipe_active = 0;
 	overview_swipe_triggered = 0;
@@ -7496,6 +7547,8 @@ rendermon(struct wl_listener *listener, void *data)
 	/* The overview clones the live buffers, so the camera zoom has to be on
 	 * them before anything is built from them this frame. */
 	driftapply(m);
+	if (!skipframe)
+		animpending |= wsdragframe(m);
 
 	if (overview_visible && overview_dirty && !skipframe) {
 		overview_dirty = 0;
