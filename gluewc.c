@@ -836,6 +836,9 @@ static struct wlr_xwayland *xwayland;
 
 /* attempt to encapsulate suck into one file */
 #include "client.h"
+static int cfgbindcombo(char *combo, uint32_t *mods, xkb_keysym_t *sym);
+#include "hypr.c"
+#include "hyprexport.c"
 
 /* function implementations */
 static int
@@ -3772,6 +3775,7 @@ checkidleinhibitor(struct wlr_surface *exclude)
 void
 cleanup(void)
 {
+	hyprcleanup();
 	cleanuplisteners();
 #ifdef XWAYLAND
 	wlr_xwayland_destroy(xwayland);
@@ -5021,6 +5025,7 @@ destroynotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the xdg_toplevel is destroyed. */
 	Client *c = wl_container_of(listener, c, destroy);
+	exportforget(c);
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
@@ -5613,6 +5618,13 @@ saveworkspacestate(void)
 	fclose(f);
 }
 
+static void
+hyprsyncidle(void *data)
+{
+	hypr_idle = NULL;
+	hyprsync();
+}
+
 void
 ipcnotifyall(void)
 {
@@ -5620,6 +5632,10 @@ ipcnotifyall(void)
 	wl_list_for_each(io, &ipc_outputs, link)
 		ipcstatus(io);
 	saveworkspacestate();
+	/* Hyprland events go out once per loop iteration */
+	if (!hypr_idle)
+		hypr_idle = wl_event_loop_add_idle(wl_display_get_event_loop(dpy),
+				hyprsyncidle, NULL);
 }
 
 static void
@@ -7797,6 +7813,7 @@ run(char *startup_cmd)
 	if (!socket)
 		die("startup: display_add_socket_auto");
 	setenv("WAYLAND_DISPLAY", socket, 1);
+	hyprsetup(socket);
 	wlr_log(WLR_INFO, "Running compositor on wayland display '%s'", socket);
 
 	/* Start the backend. This will enumerate outputs and inputs, become the DRM
@@ -9255,6 +9272,7 @@ setup(void)
 	wl_list_init(&ipc_outputs);
 	wl_global_create(dpy, &zdwl_ipc_manager_v2_interface, 2, NULL, ipcmgrbind);
 	ftl_mgr = wlr_foreign_toplevel_manager_v1_create(dpy);
+	exportsetup();
 
 	/* Make sure XWayland clients don't connect to the parent X server,
 	 * e.g when running in the x11 backend or the wayland backend and the
@@ -9768,6 +9786,7 @@ unmapnotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the surface is unmapped, and should no longer be shown. */
 	Client *c = wl_container_of(listener, c, unmap);
+	exportforget(c);
 	clientcloseanim(c);
 	c->anim.closing = 0;
 	if (c == grabc) {

@@ -19,24 +19,33 @@ LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(SCENEFX_LIBS) $(WLR_LIBS) -lm $(LIB
 MSGCFLAGS = `$(PKG_CONFIG) --cflags wayland-client` -I. $(GLUEWCDEVCFLAGS) $(CFLAGS)
 MSGLIBS   = `$(PKG_CONFIG) --libs wayland-client` $(LIBS)
 
-all: gluewc gluewc-msg
+all: gluewc gluewc-msg gluewc-hyprctl
 
 check: gluewc
 	sh -n install.sh gluewc-session gluewc-backlight tests/drm-test.sh
 	$(MAKE) -C tests
-gluewc: gluewc.o util.o dwl-ipc-unstable-v2-protocol.o
-	$(CC) gluewc.o util.o dwl-ipc-unstable-v2-protocol.o $(GLUEWCCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+HYPROBJS = hyprland-toplevel-export-v1-protocol.o hyprland-toplevel-mapping-v1-protocol.o \
+	wlr-foreign-toplevel-management-unstable-v1-protocol.o ext-foreign-toplevel-list-v1-protocol.o
+gluewc: gluewc.o util.o dwl-ipc-unstable-v2-protocol.o $(HYPROBJS)
+	$(CC) gluewc.o util.o dwl-ipc-unstable-v2-protocol.o $(HYPROBJS) $(GLUEWCCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+gluewc-hyprctl: gluewc-hyprctl.c
+	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L $(GLUEWCDEVCFLAGS) $(CFLAGS) $(LDFLAGS) gluewc-hyprctl.c -o $@
 gluewc-msg: gluewc-msg.o dwl-ipc-unstable-v2-protocol.o wlr-output-power-management-unstable-v1-protocol.o
 	$(CC) gluewc-msg.o dwl-ipc-unstable-v2-protocol.o wlr-output-power-management-unstable-v1-protocol.o $(MSGCFLAGS) $(LDFLAGS) $(MSGLIBS) -o $@
 gluewc-msg.o: gluewc-msg.c dwl-ipc-unstable-v2-client-protocol.h \
 	wlr-output-power-management-unstable-v1-client-protocol.h
 	$(CC) $(CPPFLAGS) $(MSGCFLAGS) -o $@ -c gluewc-msg.c
-gluewc.o: gluewc.c client.h config.h config.mk cursor-shape-v1-protocol.h \
-	dwl-ipc-unstable-v2-protocol.h \
+gluewc.o: gluewc.c client.h config.h config.mk hypr.c hyprexport.c cursor-shape-v1-protocol.h \
+	dwl-ipc-unstable-v2-protocol.h hyprland-toplevel-export-v1-protocol.h \
+	hyprland-toplevel-mapping-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
 	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h
 util.o: util.c util.h
 dwl-ipc-unstable-v2-protocol.o: dwl-ipc-unstable-v2-protocol.c dwl-ipc-unstable-v2-protocol.h
+hyprland-toplevel-export-v1-protocol.o: hyprland-toplevel-export-v1-protocol.c
+hyprland-toplevel-mapping-v1-protocol.o: hyprland-toplevel-mapping-v1-protocol.c
+wlr-foreign-toplevel-management-unstable-v1-protocol.o: wlr-foreign-toplevel-management-unstable-v1-protocol.c
+ext-foreign-toplevel-list-v1-protocol.o: ext-foreign-toplevel-list-v1-protocol.c
 wlr-output-power-management-unstable-v1-protocol.o: wlr-output-power-management-unstable-v1-protocol.c
 	$(CC) $(CPPFLAGS) $(MSGCFLAGS) -o $@ -c wlr-output-power-management-unstable-v1-protocol.c
 
@@ -76,28 +85,46 @@ dwl-ipc-unstable-v2-protocol.c:
 dwl-ipc-unstable-v2-client-protocol.h:
 	$(WAYLAND_SCANNER) client-header \
 		protocols/dwl-ipc-unstable-v2.xml $@
+hyprland-toplevel-export-v1-protocol.h:
+	$(WAYLAND_SCANNER) server-header protocols/hyprland-toplevel-export-v1.xml $@
+hyprland-toplevel-export-v1-protocol.c:
+	$(WAYLAND_SCANNER) private-code protocols/hyprland-toplevel-export-v1.xml $@
+hyprland-toplevel-mapping-v1-protocol.h:
+	$(WAYLAND_SCANNER) server-header protocols/hyprland-toplevel-mapping-v1.xml $@
+hyprland-toplevel-mapping-v1-protocol.c:
+	$(WAYLAND_SCANNER) private-code protocols/hyprland-toplevel-mapping-v1.xml $@
+wlr-foreign-toplevel-management-unstable-v1-protocol.c:
+	$(WAYLAND_SCANNER) private-code protocols/wlr-foreign-toplevel-management-unstable-v1.xml $@
+ext-foreign-toplevel-list-v1-protocol.c:
+	$(WAYLAND_SCANNER) private-code \
+		$(WAYLAND_PROTOCOLS)/staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml $@
 
 config.h:
 	cp config.def.h $@
 clean:
-	rm -f gluewc gluewc-msg *.o *-protocol.h *-protocol.c
+	rm -f gluewc gluewc-msg gluewc-hyprctl *.o *-protocol.h *-protocol.c
 
 dist: clean
 	mkdir -p gluewc-$(VERSION)
 	cp -R .github docs LICENSE* Makefile CHANGELOG.md CONTRIBUTING.md \
 		README.md SECURITY.md install.sh flake.nix client.h config.def.h \
 		config.def.conf config.mk protocols gluewc.1 gluewc.c gluewc-msg.c \
+		hypr.c hyprexport.c gluewc-hyprctl.c \
 		util.c util.h gluewc.desktop gluewc-session gluewc-backlight gluewc-$(VERSION)
 	tar -caf gluewc-$(VERSION).tar.gz gluewc-$(VERSION)
 	rm -rf gluewc-$(VERSION)
 
-install: gluewc gluewc-msg
+install: gluewc gluewc-msg gluewc-hyprctl
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	rm -f $(DESTDIR)$(PREFIX)/bin/gluewc $(DESTDIR)$(PREFIX)/bin/gluewc-msg
 	cp -f gluewc $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/gluewc
 	cp -f gluewc-msg $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/gluewc-msg
+	mkdir -p $(DESTDIR)$(PREFIX)/lib/gluewc/bin
+	cp -f gluewc-hyprctl $(DESTDIR)$(PREFIX)/lib/gluewc/bin/hyprctl
+	chmod 755 $(DESTDIR)$(PREFIX)/lib/gluewc/bin/hyprctl
+	ln -sf ../lib/gluewc/bin/hyprctl $(DESTDIR)$(PREFIX)/bin/gluewc-hyprctl
 	cp -f gluewc-session $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/gluewc-session
 	cp -f gluewc-backlight $(DESTDIR)$(PREFIX)/bin
@@ -117,10 +144,11 @@ install: gluewc gluewc-msg
 	sync
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/gluewc $(DESTDIR)$(PREFIX)/bin/gluewc-session \
-		$(DESTDIR)$(PREFIX)/bin/gluewc-msg $(DESTDIR)$(MANDIR)/man1/gluewc.1 \
+		$(DESTDIR)$(PREFIX)/bin/gluewc-msg $(DESTDIR)$(PREFIX)/bin/gluewc-hyprctl \
+		$(DESTDIR)$(MANDIR)/man1/gluewc.1 \
 		$(DESTDIR)$(DATADIR)/gluewc/config.def.conf \
 		$(DESTDIR)$(SESSIONDIR)/gluewc.desktop
-	rm -rf $(DESTDIR)$(DATADIR)/doc/gluewc
+	rm -rf $(DESTDIR)$(DATADIR)/doc/gluewc $(DESTDIR)$(PREFIX)/lib/gluewc
 
 .PHONY: all check clean dist install uninstall
 

@@ -283,6 +283,23 @@ or none at all — but it is the combination the compositor is developed against
 autostart = qs -c glueqs
 ```
 
+### MacShell and other Hyprland shells
+
+gluewc answers Hyprland's IPC: the request and event sockets under
+`$XDG_RUNTIME_DIR/hypr/gluewc-<display>/`, the `hl.dsp.*` dispatchers, and the
+toplevel export and mapping protocols that window previews use. The signature
+is not exported to the session, so programs only take gluewc for Hyprland when
+they are pointed at it; `gluewc-hyprctl` (also installed as `hyprctl` in
+`/usr/lib/gluewc/bin`) is a client for it.
+
+[MacShell](https://github.com/0-ss/MacShell), the macOS Tahoe style menu bar,
+Dock and lock screen by Rickky and vSuol, runs on it this way. Glue Linux
+packages it with a launcher that sets this up:
+
+```ini
+autostart = glue-macshell
+```
+
 ## Configuration and building
 
 - [Installation and distro notes](docs/INSTALL.md)
