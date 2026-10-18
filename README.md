@@ -319,6 +319,17 @@ config. Run `man gluewc` for command-line and environment details.
 
 ## License and credits
 
-gluewc is GPL-3.0-or-later. It is derived from dwl, which grew from the wlroots
-TinyWL example and carries code influenced by dwm and sway. See `LICENSE*` and
-the Git history for the complete notices.
+gluewc is GPL-3.0-or-later. It stands on:
+
+- [dwl](https://codeberg.org/dwl/dwl), which grew from the wlroots TinyWL
+  example and carries code influenced by [dwm](https://dwm.suckless.org) and
+  [sway](https://swaywm.org)
+- [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots) and
+  [SceneFX](https://github.com/wlrfx/scenefx) (MIT)
+- [niri](https://github.com/YaLTeR/niri) and
+  [driftwm](https://github.com/malbiruk/driftwm), whose layouts the scrolling and
+  drift modes follow
+- [Hyprland](https://hyprland.org), whose IPC it speaks for shells like
+  [MacShell](https://github.com/0-ss/MacShell)
+
+See `LICENSE*` and the Git history for the complete notices.
