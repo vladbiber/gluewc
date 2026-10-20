@@ -710,6 +710,8 @@ static char cfg_errmsg[192];
 static char cfg_path[512];
 /* app_id/class globs that open fullscreen; fullscreen_apps in the config */
 static char fullscreen_apps[512] = "steam_app_* cs2 org.vinegarhq.Sober";
+/* a visible full screen window keeps the session awake (X11 games send no inhibitor) */
+static int idle_inhibit_fullscreen = 1;
 static int overview_button_swallow;
 static double overview_swipe_dx, overview_swipe_dy;
 static int overview_swipe_active, overview_swipe_triggered;
@@ -3789,6 +3791,17 @@ checkidleinhibitor(struct wlr_surface *exclude)
 {
 	int inhibited = 0, unused_lx, unused_ly;
 	struct wlr_idle_inhibitor_v1 *inhibitor;
+	Client *c;
+
+	if (idle_inhibit_fullscreen) {
+		wl_list_for_each(c, &clients, link) {
+			if (c->isfullscreen && c->mon && c->mon->wlr_output->enabled
+					&& VISIBLEON(c, c->mon) && client_surface(c) != exclude) {
+				wlr_idle_notifier_v1_set_inhibited(idle_notifier, 1);
+				return;
+			}
+		}
+	}
 	wl_list_for_each(inhibitor, &idle_inhibit_mgr->inhibitors, link) {
 		struct wlr_surface *surface = wlr_surface_get_root_surface(inhibitor->surface);
 		struct wlr_scene_tree *tree = surface->data;
@@ -9024,6 +9037,8 @@ readconfig(void)
 			cfgcolor(v, normalmodecolor);
 		} else if (!strcmp(k, "root_color")) {
 			cfgcolor(v, rootcolor);
+		} else if (!strcmp(k, "idle_inhibit_fullscreen")) {
+			idle_inhibit_fullscreen = !strcmp(v, "true") || !strcmp(v, "1");
 		} else if (!strcmp(k, "fullscreen_apps")) {
 			snprintf(fullscreen_apps, sizeof fullscreen_apps, "%s", v);
 		} else if (!strcmp(k, "warp_pointer")) {
