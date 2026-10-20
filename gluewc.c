@@ -3382,8 +3382,12 @@ driftscalebuf(struct wlr_scene_buffer *buffer, int sx, int sy, void *data)
 		return;
 	}
 	wlr_scene_node_set_enabled(&buffer->node, 1);
+	/* a CSD shadow outside the window geometry is cut by the clip too */
 	if (vis.x != dst.x || vis.y != dst.y || vis.width != dst.width
-			|| vis.height != dst.height) {
+			|| vis.height != dst.height || x1 != ds->list[i].x
+			|| y1 != ds->list[i].y
+			|| x2 != ds->list[i].x + s->surface->current.width
+			|| y2 != ds->list[i].y + s->surface->current.height) {
 		/* only the visible part is drawn: pick that part of the buffer
 		 * and shrink the destination to match */
 		struct wlr_fbox src;
