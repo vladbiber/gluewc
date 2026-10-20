@@ -5367,13 +5367,28 @@ fullscreennotify(struct wl_listener *listener, void *data)
 	setfullscreen(c, client_wants_fullscreen(c));
 }
 
+/* NVIDIA spin-waits on the GPU unless told to sleep; read once at EGL init, so clients don't inherit it */
+static struct wlr_renderer *
+createrenderer(void)
+{
+	struct wlr_renderer *r;
+	int set = !getenv("__GL_YIELD");
+
+	if (set)
+		setenv("__GL_YIELD", "USLEEP", 1);
+	r = fx_renderer_create(backend);
+	if (set)
+		unsetenv("__GL_YIELD");
+	return r;
+}
+
 void
 gpureset(struct wl_listener *listener, void *data)
 {
 	struct wlr_renderer *old_drw = drw;
 	struct wlr_allocator *old_alloc = alloc;
 	struct Monitor *m;
-	if (!(drw = fx_renderer_create(backend)))
+	if (!(drw = createrenderer()))
 		die("couldn't recreate renderer");
 
 	if (!(alloc = wlr_allocator_autocreate(backend, drw)))
@@ -9098,7 +9113,7 @@ setup(void)
 	 * can also specify a renderer using the WLR_RENDERER env var.
 	 * The renderer is responsible for defining the various pixel formats it
 	 * supports for shared memory, this configures that for clients. */
-	if (!(drw = fx_renderer_create(backend)))
+	if (!(drw = createrenderer()))
 		die("couldn't create renderer");
 	wl_signal_add(&drw->events.lost, &gpu_reset);
 
